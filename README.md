@@ -2,7 +2,7 @@
 
 An Airbnb-style analytics engineering project built with Snowflake and dbt. It models bookings, hosts, and listings through a medallion-style warehouse, with reusable SQL macros, incremental models, snapshots, and data quality checks.
 
-> **Implementation status:** the dbt warehouse models and local CSV datasets are present. The AWS/S3 ingestion configuration is a template; cloud storage, orchestration, CI/CD, and dashboards are proposed extensions, not deployed components.
+> **Implementation status:** the dbt warehouse models and local CSV datasets are present. The Snowflake S3 stage and `COPY INTO` load pattern is represented in `DDL/resources.sql`; its bucket URL, target table, file name, and AWS credentials are intentionally replaced with placeholders in this repository copy for security. Restore real values from secure configuration before running it. Automated file delivery, orchestration, CI/CD, and dashboards are not described here as deployed components.
 
 ## At a glance
 
@@ -14,7 +14,7 @@ An Airbnb-style analytics engineering project built with Snowflake and dbt. It m
 | Modeling approach | Bronze, silver, and gold layers |
 | History | Timestamp-based dbt snapshots |
 | Data quality | dbt test, including a warning-level custom check |
-| Cloud ingestion | Snowflake stage/COPY template; S3 configuration still required |
+| Cloud ingestion | Snowflake stage/COPY load pattern; sensitive/account-specific values redacted in the SQL copy |
 | Orchestration | Not implemented |
 
 ## System architecture
@@ -43,7 +43,7 @@ flowchart LR
     DBT -. compiles and runs .-> GO
 ```
 
-The repository currently contains the CSVs, Snowflake table definitions, dbt models, snapshots, macros, and tests. The dotted connections identify setup or deployment steps that still need to be supplied; they are not an already-running AWS pipeline.
+The repository currently contains the CSVs, Snowflake table definitions, dbt models, snapshots, macros, and tests. The dotted connections identify setup or deployment steps that still need to be supplied; they are not evidence of an automated AWS pipeline. Values in the checked-in S3 load SQL are placeholders substituted for security and must be supplied securely to execute that script.
 
 ### AWS-oriented reference architecture
 
@@ -71,11 +71,11 @@ Possible AWS components and their responsibilities:
 
 | Component | Proposed responsibility | Project status |
 |---|---|---|
-| Amazon S3 | Store source files in a durable landing area | Local CSVs exist; bucket is not configured |
+| Amazon S3 | Store source files in a durable landing area | S3 stage/COPY load pattern is documented; bucket details are redacted in the SQL copy |
 | S3 prefixes | Separate landing, processed, and rejected files | Design recommendation |
 | S3 event notifications + SQS | Buffer file-arrival events and avoid losing bursts | Not implemented |
-| Snowflake storage integration | Grant Snowflake scoped access to S3 without embedding long-lived AWS keys | Not configured |
-| Snowpipe or scheduled `COPY INTO` | Load new files into Snowflake staging | SQL template exists; automation is not implemented |
+| Snowflake storage integration | Grant Snowflake scoped access to S3 without embedding long-lived AWS keys | Recommended security option; configuration is not shown in this repository |
+| Snowpipe or scheduled `COPY INTO` | Load new files into Snowflake staging | `COPY INTO` load pattern is present; identifiers and credentials are redacted, and automated triggering is not implemented here |
 | dbt Core | Build warehouse transformations and run tests | Implemented locally |
 | GitHub Actions or dbt Cloud | Validate and deploy dbt changes | Not implemented |
 | MWAA or Step Functions | Coordinate multi-step ingestion and transformation | Optional future choice; not selected |
@@ -249,7 +249,7 @@ The Snowflake account, warehouse, role, database, schema, and authentication val
 
 ## Security and deployment notes
 
-The current load SQL is a learning template, not a production credential pattern. It includes placeholders for an S3 URL and AWS keys to show the shape of a `COPY INTO` statement. Do not put working credentials into the SQL file or source control.
+The checked-in `DDL/resources.sql` copy has its S3 URL, target table, file name, and AWS credentials replaced with placeholders for security. Those placeholders are redactions, not the values to run with; supply the actual configuration securely. Do not commit working credentials. For production, prefer a Snowflake storage integration with an AWS IAM role over embedding long-lived AWS keys in SQL.
 
 For a cloud deployment:
 
@@ -269,7 +269,7 @@ The bronze models use `CREATED_AT` as a high-water mark. This is easy to underst
 
 ### File ingestion
 
-`DDL/resources.sql` demonstrates Snowflake file format, stage, and `COPY INTO` objects. It currently has placeholder values and requires valid Snowflake/AWS configuration. It does not create an S3 bucket, upload files, monitor arrivals, schedule loads, or handle rejected-file remediation.
+`DDL/resources.sql` defines a Snowflake file format and external stage, then uses `COPY INTO` to load a named file from S3 into a target table. The checked-in copy has security-sensitive and environment-specific values replaced with placeholders, so it must be populated from secure configuration before execution. This SQL does not create an S3 bucket, upload local files, monitor arrivals, schedule loads, or handle rejected-file remediation.
 
 ### Orchestration
 
