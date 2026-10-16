@@ -209,13 +209,18 @@ Column-level descriptions live in `aws_snowflake_project/models/schema.yml`.
 | `obt`, `fact` | One booking with listing and host attributes | `booking_id` |
 | `dim_listings`, `dim_hosts`, `dim_bookings` (snapshots, `gold` schema) | One version of a listing, host or booking (SCD Type 2) | Entity ID plus validity range |
 
-**Booking totals.** `total_amount` is `nights_booked * booking_amount`, rounded to 2 decimals. It excludes `cleaning_fee` and `service_fee`, which are reported separately. Open question: the sample `booking_amount` values look like full-stay prices, so confirm whether this multiplication is intended before building revenue metrics.
+**Booking totals.** `booking_amount` is the full-stay price: across the 5,000 sample bookings, `booking_amount / (nights_booked * price_per_night)` has a median of 1.02. The intended total is therefore `booking_amount`, excluding `cleaning_fee` and `service_fee`, which are reported separately. `silver_bookings` currently computes `nights_booked * booking_amount`, which overstates revenue by roughly the number of nights; this is a known defect to fix before building revenue metrics.
 
 **Cancellations.** Cancelled bookings stay in every layer and are identified by `booking_status`. Revenue and booking-count metrics should exclude `cancelled` rows unless a metric states otherwise.
 
 **Timestamps.** `booking_date` is the booking's date and drives time-based reporting. `created_at` is the load timestamp and the incremental watermark only; it is not a business date.
 
-**Known limitation.** The silver models set `keys=` in their config, which dbt does not treat as a unique key (the setting is `unique_key`). Until that is changed, a re-delivered row is appended rather than merged, so the one-row-per-key grain is not enforced.
+**Known limitations (confirmed in Snowflake).**
+
+- **Duplicate silver rows.** The silver models have no incremental filter and set `keys=`, which dbt does not treat as a unique key (the setting is `unique_key`). Each run appends every bronze row again: `silver_bookings` has 35,000 rows for 5,000 distinct bookings, `silver_listings` 2,500 for 500, and `silver_hosts` 600 for 200. The one-row-per-key grain is not enforced.
+- **Fan-out downstream.** Because of the duplicates, `obt` has 240,000 rows instead of one per booking, and the `dim_*` snapshots are built from it, so they inherit the duplicates.
+- **`fact` not built.** `AIRBNB.GOLD.FACT` does not exist yet, so its grain is unverified.
+- **Dimension source.** The `dim_*` snapshots read from `obt` (one row per booking) through the ephemeral models, not from the one-row-per-entity silver tables.
 
 ## Historical tracking
 

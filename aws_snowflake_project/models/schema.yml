@@ -44,8 +44,8 @@ models:
         description: Date of the booking, used for time-based reporting.
       - name: total_amount
         description: >
-          nights_booked * booking_amount, rounded to 2 decimals. Excludes cleaning_fee and service_fee.
-          Assumes booking_amount is a per-night rate; confirm against the source.
+          Intended value is booking_amount (a full-stay price), excluding cleaning_fee and service_fee.
+          Current SQL computes nights_booked * booking_amount, which overstates revenue.
       - name: cleaning_fee
         description: Cleaning fee, reported separately from total_amount.
       - name: service_fee
