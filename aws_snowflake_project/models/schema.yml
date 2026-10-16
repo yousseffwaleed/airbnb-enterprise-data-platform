@@ -1,0 +1,101 @@
+version: 2
+
+models:
+  - name: bronze_booking
+    description: >
+      Grain: one row per booking record loaded from staging.bookings (booking_id).
+      Source-shaped copy; incremental on created_at.
+    columns:
+      - name: booking_id
+        description: Booking identifier.
+      - name: created_at
+        description: Load timestamp, used as the incremental watermark.
+
+  - name: bronze_hosts
+    description: >
+      Grain: one row per host record loaded from staging.hosts (host_id).
+      Source-shaped copy; incremental on created_at.
+    columns:
+      - name: host_id
+        description: Host identifier.
+      - name: created_at
+        description: Load timestamp, used as the incremental watermark.
+
+  - name: bronze_listings
+    description: >
+      Grain: one row per listing record loaded from staging.listings (listing_id).
+      Source-shaped copy; incremental on created_at.
+    columns:
+      - name: listing_id
+        description: Listing identifier.
+      - name: created_at
+        description: Load timestamp, used as the incremental watermark.
+
+  - name: silver_bookings
+    description: >
+      Grain: one row per booking (booking_id).
+      Cancelled bookings are kept and identified by booking_status; they are not filtered out.
+    columns:
+      - name: booking_id
+        description: Unique booking identifier.
+      - name: listing_id
+        description: Listing that was booked.
+      - name: booking_date
+        description: Date of the booking, used for time-based reporting.
+      - name: total_amount
+        description: >
+          nights_booked * booking_amount, rounded to 2 decimals. Excludes cleaning_fee and service_fee.
+          Assumes booking_amount is a per-night rate; confirm against the source.
+      - name: cleaning_fee
+        description: Cleaning fee, reported separately from total_amount.
+      - name: service_fee
+        description: Service fee, reported separately from total_amount.
+      - name: booking_status
+        description: Booking state, for example confirmed or cancelled.
+      - name: created_at
+        description: Load timestamp, used as the incremental watermark; not the booking date.
+
+  - name: silver_listings
+    description: "Grain: one row per listing (listing_id)."
+    columns:
+      - name: listing_id
+        description: Unique listing identifier.
+      - name: host_id
+        description: Host that owns the listing.
+      - name: price_per_night
+        description: Nightly price of the listing.
+      - name: price_per_night_tag
+        description: Price category derived from price_per_night by the tag macro.
+      - name: created_at
+        description: Load timestamp, used as the incremental watermark.
+
+  - name: silver_hosts
+    description: "Grain: one row per host (host_id)."
+    columns:
+      - name: host_id
+        description: Unique host identifier.
+      - name: host_name
+        description: Host name with spaces replaced by underscores.
+      - name: response_rate
+        description: Host response rate as a percentage.
+      - name: response_rate_tag
+        description: VERY GOOD above 95, GOOD above 80, FAIR above 60, otherwise POOR.
+      - name: created_at
+        description: Load timestamp, used as the incremental watermark.
+
+  - name: obt
+    description: >
+      Grain: one row per booking (booking_id), with listing and host attributes.
+      Built from silver_bookings with LEFT JOINs to silver_listings and silver_hosts,
+      so a booking with no matching listing or host keeps NULL attributes.
+    columns:
+      - name: booking_id
+        description: Unique booking identifier.
+
+  - name: fact
+    description: >
+      Grain: one row per booking (booking_id), selecting measures from obt
+      and left-joined to the listing and host dimensions.
+    columns:
+      - name: booking_id
+        description: Unique booking identifier.

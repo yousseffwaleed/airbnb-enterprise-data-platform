@@ -140,6 +140,83 @@ The gold layer combines silver entities for easier analysis. The operational bas
 
 The `obt.sql` model uses Jinja configuration to generate column selections and joins. This demonstrates dbt macro/Jinja capabilities; as the project grows, model-specific SQL or tested macros may be easier to maintain than a highly generic query generator.
 
+### Model lineage
+
+```mermaid
+flowchart LR
+    subgraph SRC[Source: AIRBNB.STAGING]
+        sb[bookings]
+        sl[listings]
+        sh[hosts]
+    end
+
+    subgraph BRONZE[Bronze: raw copy]
+        bb[bronze_booking]
+        bl[bronze_listings]
+        bh[bronze_hosts]
+    end
+
+    subgraph SILVER[Silver: cleaned + derived columns]
+        sib[silver_bookings]
+        sil[silver_listings]
+        sih[silver_hosts]
+    end
+
+    subgraph GOLD[Gold]
+        obt[obt: one big table]
+        fact[fact]
+        eb[ephemeral bookings.sql]
+        el[ephemeral listings.sql]
+        eh[ephemeral hosts.sql]
+    end
+
+    subgraph SNAP[Snapshots, built by dbt snapshot]
+        db[dim_bookings]
+        dl[dim_listings]
+        dh[dim_hosts]
+    end
+
+    sb --> bb --> sib
+    sl --> bl --> sil
+    sh --> bh --> sih
+
+    sib --> obt
+    sil --> obt
+    sih --> obt
+
+    obt --> fact
+    obt --> eb --> db
+    obt --> el --> dl
+    obt --> eh --> dh
+
+    dl -. joined on listing_id .-> fact
+    dh -. joined on host_id .-> fact
+```
+
+- `fact` selects keys and measures from `obt`. Its joins to `dim_listings` and `dim_hosts` select no dimension columns.
+- The ephemeral models in `models/gold/ephemeral/` choose each dimension's columns from `obt`. They create no tables.
+- The `dim_*` tables are dbt snapshots in `AIRBNB.GOLD`, created by `dbt snapshot` from the ephemeral models.
+
+## Model grains and business rules
+
+Column-level descriptions live in `aws_snowflake_project/models/schema.yml`.
+
+| Model | One row represents | Key |
+|---|---|---|
+| `bronze_booking`, `silver_bookings` | One booking | `booking_id` |
+| `bronze_listings`, `silver_listings` | One listing | `listing_id` |
+| `bronze_hosts`, `silver_hosts` | One host | `host_id` |
+| `obt`, `fact` | One booking with listing and host attributes | `booking_id` |
+| `dim_listings`, `dim_hosts`, `dim_bookings` (snapshots, `gold` schema) | One version of a listing, host or booking (SCD Type 2) | Entity ID plus validity range |
+
+**Booking totals.** `total_amount` is `nights_booked * booking_amount`, rounded to 2 decimals. It excludes `cleaning_fee` and `service_fee`, which are reported separately. Open question: the sample `booking_amount` values look like full-stay prices, so confirm whether this multiplication is intended before building revenue metrics.
+
+**Cancellations.** Cancelled bookings stay in every layer and are identified by `booking_status`. Revenue and booking-count metrics should exclude `cancelled` rows unless a metric states otherwise.
+
+**Timestamps.** `booking_date` is the booking's date and drives time-based reporting. `created_at` is the load timestamp and the incremental watermark only; it is not a business date.
+
+**Known limitation.** The silver models set `keys=` in their config, which dbt does not treat as a unique key (the setting is `unique_key`). Until that is changed, a re-delivered row is appended rather than merged, so the one-row-per-key grain is not enforced.
+
 ## Historical tracking
 
 The project contains timestamp-strategy snapshots for bookings, hosts, and listings. A unique key identifies each entity, while its creation/update timestamp is used as the snapshot's `updated_at` input.
