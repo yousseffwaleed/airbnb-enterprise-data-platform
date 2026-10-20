@@ -11,3 +11,10 @@ select
     BOOKING_STATUS,
     CREATED_AT
 from {{ ref('bronze_booking') }}
+
+{% if is_incremental() %}
+WHERE CREATED_AT > (
+    SELECT MAX(CREATED_AT)
+    FROM {{ this }}
+)
+{% endif %}

@@ -134,6 +134,16 @@ The silver layer applies business-oriented cleanup and enrichment:
 - **Hosts:** standardizes host text and classifies response rates into readable tags.
 - **Listings:** carries listing, capacity, location, and price attributes and derives a price category.
 
+Silver models are incremental and use `unique_key` to match incoming records to the current entity row:
+
+| Model | `unique_key` | What the key identifies |
+|---|---|---|
+| `silver_bookings` | `booking_id` | One booking |
+| `silver_listings` | `LISTING_ID` | One listing |
+| `silver_hosts` | `HOST_ID` | One host |
+
+The key is specific to each model. `HOST_ID` can appear on many rows in `silver_listings` because one host may own multiple listings; `LISTING_ID` is the listing model's key. `unique_key` tells dbt how to match rows for incremental updates. It does not itself test or enforce uniqueness; add dbt `unique` tests for that.
+
 ### Gold
 
 The gold layer combines silver entities for easier analysis. The operational base table joins bookings to listings and then listings to hosts, making reservation, property, and host attributes available together.

@@ -13,3 +13,10 @@ SELECT
     END AS RESPONSE_RATE_TAG,
     CREATED_AT
 FROM {{ ref('bronze_hosts') }}
+
+{% if is_incremental() %}
+WHERE CREATED_AT > (
+    SELECT MAX(CREATED_AT)
+    FROM {{ this }}
+)
+{% endif %}
