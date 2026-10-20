@@ -1,5 +1,4 @@
-{{ config(materialized="incremental", keys="LISTING_ID") }}
-
+{{ config(materialized="incremental", unique_key="LISTING_ID") }}
 
 SELECT
     LISTING_ID,
@@ -15,3 +14,10 @@ SELECT
     {{ tag('CAST(PRICE_PER_NIGHT AS INT)') }} AS PRICE_PER_NIGHT_TAG,
     CREATED_AT
 FROM {{ ref('bronze_listings') }}
+
+{% if is_incremental() %}
+WHERE CREATED_AT > (
+    SELECT MAX(CREATED_AT)
+    FROM {{ this }}
+)
+{% endif %}

@@ -1,5 +1,4 @@
-{{ config(materialized="incremental", keys="HOST_ID") }}
-
+{{ config(materialized="incremental", unique_key="HOST_ID") }}
 SELECT
     HOST_ID,
     REPLACE(HOST_NAME, ' ', '_') AS HOST_NAME,
@@ -14,3 +13,10 @@ SELECT
     END AS RESPONSE_RATE_TAG,
     CREATED_AT
 FROM {{ ref('bronze_hosts') }}
+
+{% if is_incremental() %}
+WHERE CREATED_AT > (
+    SELECT MAX(CREATED_AT)
+    FROM {{ this }}
+)
+{% endif %}
