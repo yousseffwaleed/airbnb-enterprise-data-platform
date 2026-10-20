@@ -1,5 +1,4 @@
-{{ config(materialized="incremental", keys="LISTING_ID") }}
-
+{{ config(materialized="incremental", unique_key="LISTING_ID") }}
 
 SELECT
     LISTING_ID,
