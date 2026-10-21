@@ -227,10 +227,9 @@ Column-level descriptions live in `aws_snowflake_project/models/schema.yml`.
 
 **Known limitations (confirmed in Snowflake).**
 
-- **Duplicate silver rows.** The silver models have no incremental filter and set `keys=`, which dbt does not treat as a unique key (the setting is `unique_key`). Each run appends every bronze row again: `silver_bookings` has 35,000 rows for 5,000 distinct bookings, `silver_listings` 2,500 for 500, and `silver_hosts` 600 for 200. The one-row-per-key grain is not enforced.
-- **Fan-out downstream.** Because of the duplicates, `obt` has 240,000 rows instead of one per booking, and the `dim_*` snapshots are built from it, so they inherit the duplicates.
+- **Silver duplicate-key issue addressed.** Silver models now configure `unique_key` and incremental filters. After a full refresh, the three Silver keys passed their uniqueness tests. The filters use a strict `CREATED_AT > MAX(CREATED_AT)` watermark, so tied timestamps and late-arriving or updated rows may still be missed.
+- **Downstream models need rebuilding/validation.** The full refresh was run for the Silver models. Rebuild `obt` and rerun snapshots before relying on their contents; the dimensions are sourced from `obt` through the ephemeral models rather than directly from the entity-level Silver models.
 - **`fact` not built.** `AIRBNB.GOLD.FACT` does not exist yet, so its grain is unverified.
-- **Dimension source.** The `dim_*` snapshots read from `obt` (one row per booking) through the ephemeral models, not from the one-row-per-entity silver tables.
 
 ## Historical tracking
 
@@ -253,19 +252,27 @@ Macros reduce repeated expressions when their behavior is genuinely shared. They
 
 ## Data quality and validation
 
-The project includes a custom warning-level test against source bookings. It flags rows with a `booking_amount` below the configured threshold. The warning severity allows the run to complete while surfacing records for review.
+The project includes dbt schema tests in `aws_snowflake_project/models/schema.yml`:
+
+- `not_null` checks for bronze booking, listing, and host IDs
+- `unique` checks for bronze booking, listing, and host IDs
+- `not_null` and `unique` checks for silver booking, listing, and host keys
+- Relationship checks from bookings to listings and listings to hosts
+- An accepted-values check restricting booking status to `confirmed` or `cancelled`
+- `not_null` checks for booking status and listing host IDs
+
+Two singular SQL tests in `aws_snowflake_project/tests/` check numeric rules: `assert_booking_numeric_rules.sql` returns bookings with non-positive nights or negative amounts/fees, and `assert_host_response_rate_range.sql` returns hosts with response rates outside 0–100. dbt automatically discovers these files when `dbt test` runs; no model needs to call them. A singular test passes when its query returns zero rows. If it returns violating rows, dbt marks the test as failed and reports those rows; it does not modify or remove the data.
+
+It also includes a custom warning-level test against source bookings. It flags rows with a `booking_amount` below the configured threshold. The warning severity allows the run to complete while surfacing records for review.
 
 Current local validation:
 
-- `dbt test` completed with exit code `0` in the current environment.
-- The run reported one warning from the intentional warning-level check.
-- A successful test command verifies dbt execution, but does not by itself prove that every business rule or production scenario is covered.
+- `uv run dbt test --select bronze_booking bronze_hosts bronze_listings silver_bookings silver_listings silver_hosts --profiles-dir .` completed successfully: all 29 selected tests passed with no warnings or errors.
+- Run a single singular SQL test by name, for example: `uv run dbt test --select assert_booking_numeric_rules --profiles-dir .`.
+- These targeted model tests do not validate the unbuilt `fact` model, every snapshot, or incremental rerun/late-arrival behavior.
 
 Recommended additions as the model matures:
 
-- `not_null` and `unique` tests for entity keys
-- relationship tests for booking-to-listing and listing-to-host references
-- accepted-value tests for booking statuses and boolean-like fields
 - source freshness thresholds once source loading is automated
 - reconciliation checks for source and target row counts or financial totals
 - tests for incremental reruns, late-arriving records, and changed source rows
@@ -336,6 +343,8 @@ uv run dbt run --profiles-dir .
 uv run dbt test --profiles-dir .
 uv run dbt snapshot --profiles-dir .
 ```
+
+`--profiles-dir .` tells dbt to read `profiles.yml` from the current directory (`aws_snowflake_project`). The `.` is a relative path meaning "here". Run these commands from the dbt project directory. To run only the Silver data tests, use `uv run dbt test --select silver_bookings silver_listings silver_hosts --profiles-dir .`.
 
 The Snowflake account, warehouse, role, database, schema, and authentication values must match your environment. Do not commit real passwords, private keys, or cloud access keys.
 
