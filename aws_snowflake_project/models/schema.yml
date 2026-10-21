@@ -8,6 +8,32 @@ models:
     columns:
       - name: booking_id
         description: Booking identifier.
+        data_tests:
+          - not_null
+          - unique
+      - name: nights_booked
+        description: Number of nights booked; must be greater than zero.
+        data_tests:
+          - not_null
+      - name: booking_amount
+        description: Full-stay booking amount; must be non-negative.
+        data_tests:
+          - not_null
+      - name: cleaning_fee
+        description: Cleaning fee; must be non-negative.
+        data_tests:
+          - not_null
+      - name: service_fee
+        description: Service fee; must be non-negative.
+        data_tests:
+          - not_null
+      - name: booking_status
+        description: Booking state; only confirmed and cancelled are currently valid.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['confirmed', 'cancelled']
       - name: created_at
         description: Load timestamp, used as the incremental watermark.
 
@@ -18,6 +44,9 @@ models:
     columns:
       - name: host_id
         description: Host identifier.
+        data_tests:
+          - not_null
+          - unique
       - name: created_at
         description: Load timestamp, used as the incremental watermark.
 
@@ -28,6 +57,9 @@ models:
     columns:
       - name: listing_id
         description: Listing identifier.
+        data_tests:
+          - not_null
+          - unique
       - name: created_at
         description: Load timestamp, used as the incremental watermark.
 

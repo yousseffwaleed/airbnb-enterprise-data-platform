@@ -254,17 +254,22 @@ Macros reduce repeated expressions when their behavior is genuinely shared. They
 
 The project includes dbt schema tests in `aws_snowflake_project/models/schema.yml`:
 
-- `not_null` and `unique` checks for booking, listing, and host keys
+- `not_null` checks for bronze booking, listing, and host IDs
+- `unique` checks for bronze booking, listing, and host IDs
+- `not_null` and `unique` checks for silver booking, listing, and host keys
 - Relationship checks from bookings to listings and listings to hosts
 - An accepted-values check restricting booking status to `confirmed` or `cancelled`
 - `not_null` checks for booking status and listing host IDs
+
+Two singular SQL tests in `aws_snowflake_project/tests/` check numeric rules: `assert_booking_numeric_rules.sql` returns bookings with non-positive nights or negative amounts/fees, and `assert_host_response_rate_range.sql` returns hosts with response rates outside 0–100. dbt automatically discovers these files when `dbt test` runs; no model needs to call them. A singular test passes when its query returns zero rows. If it returns violating rows, dbt marks the test as failed and reports those rows; it does not modify or remove the data.
 
 It also includes a custom warning-level test against source bookings. It flags rows with a `booking_amount` below the configured threshold. The warning severity allows the run to complete while surfacing records for review.
 
 Current local validation:
 
-- `uv run dbt test --select silver_bookings silver_listings silver_hosts --profiles-dir .` completed successfully: all 15 selected tests passed with no warnings or errors.
-- This was a targeted Silver-model run; it does not validate the unbuilt `fact` model or every snapshot and business rule.
+- `uv run dbt test --select bronze_booking bronze_hosts bronze_listings silver_bookings silver_listings silver_hosts --profiles-dir .` completed successfully: all 29 selected tests passed with no warnings or errors.
+- Run a single singular SQL test by name, for example: `uv run dbt test --select assert_booking_numeric_rules --profiles-dir .`.
+- These targeted model tests do not validate the unbuilt `fact` model, every snapshot, or incremental rerun/late-arrival behavior.
 
 Recommended additions as the model matures:
 
