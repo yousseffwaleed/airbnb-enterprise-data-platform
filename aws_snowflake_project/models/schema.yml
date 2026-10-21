@@ -38,8 +38,17 @@ models:
     columns:
       - name: booking_id
         description: Unique booking identifier.
+        data_tests:
+          - not_null
+          - unique
       - name: listing_id
         description: Listing that was booked.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_listings')
+                field: listing_id
       - name: booking_date
         description: Date of the booking, used for time-based reporting.
       - name: total_amount
@@ -52,6 +61,11 @@ models:
         description: Service fee, reported separately from total_amount.
       - name: booking_status
         description: Booking state, for example confirmed or cancelled.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['confirmed', 'cancelled']
       - name: created_at
         description: Load timestamp, used as the incremental watermark; not the booking date.
 
@@ -60,8 +74,17 @@ models:
     columns:
       - name: listing_id
         description: Unique listing identifier.
+        data_tests:
+          - not_null
+          - unique
       - name: host_id
         description: Host that owns the listing.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_hosts')
+                field: host_id
       - name: price_per_night
         description: Nightly price of the listing.
       - name: price_per_night_tag
@@ -74,12 +97,21 @@ models:
     columns:
       - name: host_id
         description: Unique host identifier.
+        data_tests:
+          - not_null
+          - unique
       - name: host_name
         description: Host name with spaces replaced by underscores.
+        data_tests:
+          - not_null
       - name: response_rate
         description: Host response rate as a percentage.
+        data_tests:
+          - not_null
       - name: response_rate_tag
         description: VERY GOOD above 95, GOOD above 80, FAIR above 60, otherwise POOR.
+        data_tests:
+          - not_null
       - name: created_at
         description: Load timestamp, used as the incremental watermark.
 
@@ -91,6 +123,9 @@ models:
     columns:
       - name: booking_id
         description: Unique booking identifier.
+        data_tests:
+          - not_null
+          - unique
 
   - name: fact
     description: >
@@ -99,3 +134,6 @@ models:
     columns:
       - name: booking_id
         description: Unique booking identifier.
+        data_tests:
+          - not_null
+          - unique
