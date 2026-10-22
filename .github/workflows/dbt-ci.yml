@@ -1,0 +1,73 @@
+name: dbt CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dbt-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dbt-build:
+    name: Build and test dbt
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_PRIVATE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
+      DBT_CI_SCHEMA: CI_${{ github.event.pull_request.number && format('PR_{0}', github.event.pull_request.number) || format('MANUAL_{0}', github.run_id) }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Prepare Snowflake authentication
+        shell: bash
+        env:
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          for variable in SNOWFLAKE_ACCOUNT SNOWFLAKE_USER SNOWFLAKE_ROLE SNOWFLAKE_WAREHOUSE SNOWFLAKE_DATABASE SNOWFLAKE_PRIVATE_KEY SNOWFLAKE_PRIVATE_KEY_PASSPHRASE; do
+            if [[ -z "${!variable:-}" ]]; then
+              echo "::error::Missing required secret: $variable"
+              exit 1
+            fi
+          done
+          if [[ "$SNOWFLAKE_DATABASE" != "AIRBNB_CI" ]]; then
+            echo "::error::CI builds must target AIRBNB_CI"
+            exit 1
+          fi
+          umask 077
+          key_path="$RUNNER_TEMP/dbt_ci_private.p8"
+          printf '%s\n' "$SNOWFLAKE_PRIVATE_KEY" > "$key_path"
+          printf 'SNOWFLAKE_PRIVATE_KEY_PATH=%s\n' "$key_path" >> "$GITHUB_ENV"
+
+      - name: Check Snowflake connection
+        run: uv run dbt debug --project-dir aws_snowflake_project --profiles-dir aws_snowflake_project/ci --target ci
+
+      - name: Build models, snapshots, and tests
+        run: uv run dbt build --project-dir aws_snowflake_project --profiles-dir aws_snowflake_project/ci --target ci
+
+      - name: Remove temporary private key
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/dbt_ci_private.p8"
