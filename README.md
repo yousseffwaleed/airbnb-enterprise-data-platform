@@ -351,7 +351,7 @@ The Snowflake account, warehouse, role, database, schema, and authentication val
 
 ## GitHub Actions CI
 
-The workflow in [.github/workflows/dbt-ci.yml](.github/workflows/dbt-ci.yml) runs the **Build and test dbt** job for pull requests from branches in this repository and supports manual runs through `workflow_dispatch`. Fork PRs skip the credentialed job. The manual-run control becomes available when the workflow is present on the default branch. A daily cron trigger and production deployment are not configured.
+The workflow in [.github/workflows/dbt-ci.yml](.github/workflows/dbt-ci.yml) runs the **Build and test dbt** job for pull requests from branches in this repository and supports manual runs through `workflow_dispatch`. Fork PRs skip the credentialed job. The manual-run control becomes available when the workflow is present on the default branch.
 
 The job installs Python 3.12 and `uv`, runs `uv sync --locked`, checks the Snowflake connection, and executes `dbt build`. This builds models and snapshots and runs their tests in dependency order. The private key is written to a restricted temporary runner file and removed in an always-run cleanup step; it is not stored in the repository.
 
@@ -371,7 +371,7 @@ The profile in [aws_snowflake_project/ci/profiles.yml](aws_snowflake_project/ci/
 
 Register only the matching public key with the Snowflake service user. A public-key file or fingerprint cannot substitute for the private-key secret. The CI role has read access to the three `AIRBNB.STAGING` source tables, warehouse usage, and permission to create schemas in `AIRBNB_CI`; it does not need `ACCOUNTADMIN`.
 
-PR 7 uses schema names such as `CI_PR_7_bronze`, `CI_PR_7_silver`, and `CI_PR_7_gold`. Manual runs use a prefix based on the workflow run ID. `ref()` resolves model destinations automatically, and the schema macro prefixes layer schemas only for the `ci` target. Development naming is unchanged. Runs sharing a PR schema are serialized. CI schemas are not automatically deleted, so arrange periodic cleanup and monitor Snowflake costs.
+PR 7 uses schema names such as `CI_PR_7_bronze`, `CI_PR_7_silver`, and `CI_PR_7_gold`. Manual runs use a prefix based on the workflow run ID. `ref()` resolves model destinations automatically, and the schema macro prefixes layer schemas only for the `ci` target. Development naming is unchanged. Runs sharing a PR schema are serialized.
 
 From the repository root, with CI environment variables and a private-key file configured locally, the equivalent commands are:
 
@@ -382,9 +382,9 @@ uv run dbt build --project-dir aws_snowflake_project --profiles-dir aws_snowflak
 
 The development profile remains ignored by Git; the credential-free `ci/profiles.yml` has an explicit ignore-rule exception so GitHub receives it. Never put literal secrets into the CI profile. Rotate any exposed development credentials and assess Git history separately.
 
-### Merge protection
+### Verified build result
 
-To block merges when CI fails, configure an active GitHub branch ruleset targeting `main` and require the **Build and test dbt** status check. Workflow execution is verified; enforcement of the saved repository ruleset has not been independently verified. Warning-level data tests do not block a successful job.
+The GitHub Actions build completed with `PASS=45 WARN=1 ERROR=0 SKIP=0 TOTAL=46`. The warning came from the intentional source-booking amount check. Warning-level data tests do not block a successful job.
 
 ## Security and deployment notes
 
