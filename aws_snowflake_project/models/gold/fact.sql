@@ -1,37 +1,13 @@
-{% set congigs = [
-    {
-        "table" : ref('obt'),
-        "columns" : "GOLD_OBT.BOOKING_ID, GOLD_OBT.LISTING_ID, GOLD_OBT.HOST_ID, GOLD_OBT.TOTAL_AMOUNT, GOLD_OBT.CLEANING_FEE, GOLD_OBT.SERVICE_FEE, GOLD_OBT.ACCOMMODATES, GOLD_OBT.BEDROOMS, GOLD_OBT.BATHROOMS, GOLD_OBT.PRICE_PER_NIGHT, GOLD_OBT.RESPONSE_RATE",
-        "alias" : "GOLD_OBT"
-    },
-    { 
-        "table" : ref('dim_listings'),
-        "columns" : "",
-        "alias" : "DIM_LISTINGS",
-        "join_condition" : "GOLD_OBT.LISTING_ID = DIM_LISTINGS.LISTING_ID"
-    },
-    {
-        "table" : ref('dim_hosts'),
-        "columns" : "",
-        "alias" : "DIM_HOSTS",
-        "join_condition" : "GOLD_OBT.HOST_ID = DIM_HOSTS.HOST_ID"
-    }
-] %}
-
-
-
 SELECT
-    {% for config in congigs %}
-        {% if config['columns'] %}
-            {{ config['columns'] }}{% if not loop.last %}, {% endif %}
-        {% endif %}
-    {% endfor %}
-FROM
-    {% for config in congigs %}
-        {% if loop.first %}
-            {{ config['table'] }} AS {{ config['alias'] }}
-        {% else %}
-            LEFT JOIN {{ config['table'] }} AS {{ config['alias'] }}
-            ON {{ config['join_condition'] }}
-        {% endif %}
-    {% endfor %}
+    BOOKING_ID,
+    LISTING_ID,
+    HOST_ID,
+    TOTAL_AMOUNT,
+    CLEANING_FEE,
+    SERVICE_FEE,
+    ACCOMMODATES,
+    BEDROOMS,
+    BATHROOMS,
+    PRICE_PER_NIGHT,
+    RESPONSE_RATE
+FROM {{ ref('obt') }}
