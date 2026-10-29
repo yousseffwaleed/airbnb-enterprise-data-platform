@@ -2,7 +2,7 @@
 
 An Airbnb-style analytics engineering project built with Snowflake and dbt. It models bookings, hosts, and listings through a medallion-style warehouse, with reusable SQL macros, incremental models, snapshots, and data quality checks.
 
-> **Implementation status:** dbt models, snapshots, tests, and GitHub Actions CI are implemented. CI builds and tests against an isolated Snowflake database using key-pair authentication and GitHub Secrets. The Snowflake S3 stage and `COPY INTO` pattern in `DDL/resources.sql` still requires secure, environment-specific configuration. Automated file delivery, scheduled production orchestration, continuous deployment, and dashboards are not implemented.
+> **Implementation status:** dbt models, snapshots, tests, and GitHub Actions CI are implemented. CI builds and tests against an isolated Snowflake database using key-pair authentication and GitHub Secrets. Source data loads from S3 into Snowflake through a storage integration, a stage, and `COPY INTO` in `DDL/resources.sql`; no AWS keys are used. Automated file delivery, scheduled production orchestration, continuous deployment, and dashboards are not implemented.
 
 ## At a glance
 
@@ -14,7 +14,7 @@ An Airbnb-style analytics engineering project built with Snowflake and dbt. It m
 | Modeling approach | Bronze, silver, and gold layers |
 | History | Timestamp-based dbt snapshots |
 | Data quality | dbt test, including a warning-level custom check |
-| Cloud ingestion | Snowflake stage/COPY load pattern; sensitive/account-specific values redacted in the SQL copy |
+| Cloud ingestion | S3 bucket, Snowflake storage integration (IAM role), stage, and manual `COPY INTO` |
 | Orchestration | Not implemented |
 | Continuous integration | GitHub Actions PR checks and manual builds against `AIRBNB_CI` |
 
@@ -26,7 +26,7 @@ An Airbnb-style analytics engineering project built with Snowflake and dbt. It m
 flowchart LR
     subgraph Repo[Project repository]
         CSV[CSV sample files]
-        DDL[Snowflake DDL and load template]
+        DDL[Snowflake DDL and S3 load SQL]
         DBT[dbt project]
     end
 
@@ -44,7 +44,7 @@ flowchart LR
     DBT -. compiles and runs .-> GO
 ```
 
-The repository currently contains the CSVs, Snowflake table definitions, dbt models, snapshots, macros, and tests. The dotted connections identify setup or deployment steps that still need to be supplied; they are not evidence of an automated AWS pipeline. Values in the checked-in S3 load SQL are placeholders substituted for security and must be supplied securely to execute that script.
+The repository currently contains the CSVs, Snowflake table definitions, dbt models, snapshots, macros, and tests. The dotted connections identify setup or deployment steps that still need to be supplied; they are not evidence of an automated AWS pipeline. The S3 load is run manually from `DDL/resources.sql`, which contains no credentials.
 
 ### AWS-oriented reference architecture
 
@@ -72,11 +72,11 @@ Possible AWS components and their responsibilities:
 
 | Component | Proposed responsibility | Project status |
 |---|---|---|
-| Amazon S3 | Store source files in a durable landing area | S3 stage/COPY load pattern is documented; bucket details are redacted in the SQL copy |
+| Amazon S3 | Store source files in a durable landing area | Implemented: bucket `snowbucketyoussef`, source files under `source/` |
 | S3 prefixes | Separate landing, processed, and rejected files | Design recommendation |
 | S3 event notifications + SQS | Buffer file-arrival events and avoid losing bursts | Not implemented |
-| Snowflake storage integration | Grant Snowflake scoped access to S3 without embedding long-lived AWS keys | Recommended security option; configuration is not shown in this repository |
-| Snowpipe or scheduled `COPY INTO` | Load new files into Snowflake staging | `COPY INTO` load pattern is present; identifiers and credentials are redacted, and automated triggering is not implemented here |
+| Snowflake storage integration | Grant Snowflake scoped access to S3 without embedding long-lived AWS keys | Implemented: `s3_airbnb_int` assumes IAM role `snowflake_s3_role`, limited to read access on `source/` |
+| Snowpipe or scheduled `COPY INTO` | Load new files into Snowflake staging | Manual `COPY INTO` implemented; Snowpipe and automated triggering are not implemented |
 | dbt Core | Build warehouse transformations and run tests | Implemented locally |
 | GitHub Actions | Validate dbt changes | PR and manual CI builds implemented; production deployment not implemented |
 | MWAA or Step Functions | Coordinate multi-step ingestion and transformation | Optional future choice; not selected |
@@ -89,7 +89,7 @@ The reference design intentionally leaves orchestration as a decision. For a sma
 
 1. **Prepare source data.** The repository includes CSV examples for bookings, hosts, and listings under `sourceData/`.
 2. **Land files.** In a cloud deployment, upload source files to an S3 landing location. This upload step is not automated in the current project.
-3. **Load Snowflake staging.** The SQL in `DDL/resources.sql` demonstrates a file format, external stage, and `COPY INTO` pattern. Replace the placeholders and configure secure access before running it.
+3. **Load Snowflake staging.** `DDL/resources.sql` creates the storage integration, file format, and external stage, then loads each CSV with `COPY INTO`. It needs the IAM role and trust policy described under Security and deployment notes.
 4. **Declare dbt sources.** `models/sources/sources.yml` maps the Snowflake staging tables to dbt source names.
 5. **Build bronze models.** Bronze models select from the staging sources and use a `CREATED_AT` watermark for incremental runs.
 6. **Transform silver models.** Silver models standardize fields and add derived business attributes.
@@ -131,7 +131,7 @@ This is a simple watermark pattern suitable for demonstrating incremental dbt pr
 
 The silver layer applies business-oriented cleanup and enrichment:
 
-- **Bookings:** derives booking totals through a reusable multiplication macro and retains booking-level attributes.
+- **Bookings:** exposes `booking_amount` as `total_amount` and retains booking-level attributes.
 - **Hosts:** standardizes host text and classifies response rates into readable tags.
 - **Listings:** carries listing, capacity, location, and price attributes and derives a price category.
 
@@ -217,7 +217,7 @@ Column-level descriptions live in `aws_snowflake_project/models/schema.yml`.
 | `obt`, `fact` | One booking with listing and host attributes | `booking_id` |
 | `dim_listings`, `dim_hosts`, `dim_bookings` (snapshots, `gold` schema) | One version of a listing, host or booking (SCD Type 2) | Entity ID plus validity range |
 
-**Booking totals.** `booking_amount` is the full-stay price: across the 5,000 sample bookings, `booking_amount / (nights_booked * price_per_night)` has a median of 1.02. The intended total is therefore `booking_amount`, excluding `cleaning_fee` and `service_fee`, which are reported separately. `silver_bookings` currently computes `nights_booked * booking_amount`, which overstates revenue by roughly the number of nights; this is a known defect to fix before building revenue metrics.
+**Booking totals.** `booking_amount` is the full-stay price: across the 5,000 sample bookings, `booking_amount / (nights_booked * price_per_night)` has a median of 1.02. `silver_bookings.total_amount` is therefore `booking_amount`, excluding `cleaning_fee` and `service_fee`, which are reported separately. It previously multiplied by `nights_booked`, which overstated revenue; run `dbt build --full-refresh --select silver_bookings+` to rebuild existing rows, because the incremental filter will not rewrite them.
 
 **Cancellations.** Cancelled bookings stay in every layer and are identified by `booking_status`. Revenue and booking-count metrics should exclude `cancelled` rows unless a metric states otherwise.
 
@@ -266,7 +266,7 @@ Validation results:
 
 - `uv run dbt test --select bronze_booking bronze_hosts bronze_listings silver_bookings silver_listings silver_hosts --profiles-dir .` completed successfully: all 29 selected tests passed with no warnings or errors.
 - Run a single singular SQL test by name, for example: `uv run dbt test --select assert_booking_numeric_rules --profiles-dir .`.
-- The full CI build, locally and subsequently on GitHub Actions, completed with `PASS=45 WARN=1 ERROR=0 SKIP=0 TOTAL=46`. These are build-node outcomes, not 46 data tests; the build ran 34 data tests alongside models and snapshots.
+- A full refresh build (`dbt build --full-refresh`) against data reloaded from S3 completed with `PASS=46 WARN=1 ERROR=0 SKIP=0 TOTAL=47`. These are build-node outcomes, not 47 data tests; the build ran the data tests alongside models and snapshots, including the booking-total check.
 - The warning came from `source_tests`: 286 source bookings had `booking_amount < 200`. Its configured warning severity allowed the build to succeed.
 - Passing current-data tests does not establish incremental rerun, late-arrival, update, or snapshot-history correctness.
 
@@ -286,7 +286,7 @@ airbnb-enterprise-data-platform/
 ├── pyproject.toml                  # Python and dbt dependencies
 ├── DDL/
 │   ├── ddl.sql                     # Snowflake raw table definitions
-│   └── resources.sql               # Stage and COPY INTO template
+│   └── resources.sql               # Storage integration, stage, and COPY INTO
 ├── sourceData/
 │   ├── bookings.csv
 │   ├── hosts.csv
@@ -388,7 +388,7 @@ The GitHub Actions build completed with `PASS=45 WARN=1 ERROR=0 SKIP=0 TOTAL=46`
 
 ## Security and deployment notes
 
-The checked-in `DDL/resources.sql` copy has its S3 URL, target table, file name, and AWS credentials replaced with placeholders for security. Those placeholders are redactions, not the values to run with; supply the actual configuration securely. Do not commit working credentials. For production, prefer a Snowflake storage integration with an AWS IAM role over embedding long-lived AWS keys in SQL.
+`DDL/resources.sql` loads source data without AWS keys. A Snowflake storage integration (`s3_airbnb_int`) assumes the IAM role `snowflake_s3_role`, whose policy allows only `s3:GetObject` and `s3:ListBucket` on `s3://snowbucketyoussef/source/`. The role's trust policy accepts only the Snowflake IAM user and external ID returned by `DESC INTEGRATION s3_airbnb_int`. The role ARN and bucket path are identifiers, not secrets. Never commit access keys, `.env` files, or the integration's external ID. Do not recreate the integration with `CREATE OR REPLACE`, because that issues a new external ID and breaks the trust policy.
 
 For a cloud deployment:
 
@@ -408,7 +408,7 @@ The bronze models use `CREATED_AT` as a high-water mark. This is easy to underst
 
 ### File ingestion
 
-`DDL/resources.sql` defines a Snowflake file format and external stage, then uses `COPY INTO` to load a named file from S3 into a target table. The checked-in copy has security-sensitive and environment-specific values replaced with placeholders, so it must be populated from secure configuration before execution. This SQL does not create an S3 bucket, upload local files, monitor arrivals, schedule loads, or handle rejected-file remediation.
+`DDL/resources.sql` defines a storage integration, file format, and external stage, then uses `COPY INTO` to load each named CSV from S3 into its staging table. `COPY INTO` skips files it has already loaded, so run `TRUNCATE TABLE` on the target first to reload. The SQL does not create the S3 bucket or IAM role, upload local files, monitor arrivals, schedule loads, or handle rejected-file remediation.
 
 ### Orchestration
 
@@ -420,8 +420,8 @@ The gold layer is an analytical starting point rather than a fully governed sema
 
 ## Roadmap
 
-1. **Automate ingestion:** create the S3 landing bucket, Snowflake storage integration, and repeatable file-loading workflow.
-2. **Harden configuration:** remove credential placeholders and configure environment-specific secrets and permissions.
+1. **Automate ingestion:** S3 bucket, storage integration, and manual `COPY INTO` are implemented; add S3 event notifications with Snowpipe so new files load automatically.
+2. **Harden configuration:** replace broad S3 permissions on the CLI user with a bucket-scoped policy, and rotate any previously exposed keys.
 3. **Strengthen models and tests:** define model grains, key constraints, relationship checks, freshness, and incremental edge-case coverage.
 4. **Extend CI and add orchestration:** CI builds are implemented; verify merge protection, add optional daily validation and CI-schema cleanup, and design controlled deployments with failure alerts.
 5. **Publish analytics:** define trusted business metrics and connect a dashboard or other consumer to selected gold models.
