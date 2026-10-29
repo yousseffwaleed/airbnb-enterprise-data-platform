@@ -11,8 +11,8 @@ WITH hosts AS (
         HOST_SINCE,
         IS_SUPERHOST,
         RESPONSE_RATE_TAG,
-        HOST_CREATED_AT
-    FROM {{ ref('obt') }}
+        CREATED_AT AS HOST_CREATED_AT
+    FROM {{ ref('silver_hosts') }}
 ) 
 
 SELECT * FROM hosts

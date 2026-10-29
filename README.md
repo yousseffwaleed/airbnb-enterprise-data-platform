@@ -2,7 +2,7 @@
 
 An Airbnb-style analytics engineering project built with Snowflake and dbt. It models bookings, hosts, and listings through a medallion-style warehouse, with reusable SQL macros, incremental models, snapshots, and data quality checks.
 
-> **Implementation status:** the dbt warehouse models and local CSV datasets are present. The Snowflake S3 stage and `COPY INTO` load pattern is represented in `DDL/resources.sql`; its bucket URL, target table, file name, and AWS credentials are intentionally replaced with placeholders in this repository copy for security. Restore real values from secure configuration before running it. Automated file delivery, orchestration, CI/CD, and dashboards are not described here as deployed components.
+> **Implementation status:** dbt models, snapshots, tests, and GitHub Actions CI are implemented. CI builds and tests against an isolated Snowflake database using key-pair authentication and GitHub Secrets. Source data loads from S3 into Snowflake through a storage integration, a stage, and `COPY INTO` in `DDL/resources.sql`; no AWS keys are used. Automated file delivery, scheduled production orchestration, continuous deployment, and dashboards are not implemented.
 
 ## At a glance
 
@@ -14,8 +14,9 @@ An Airbnb-style analytics engineering project built with Snowflake and dbt. It m
 | Modeling approach | Bronze, silver, and gold layers |
 | History | Timestamp-based dbt snapshots |
 | Data quality | dbt test, including a warning-level custom check |
-| Cloud ingestion | Snowflake stage/COPY load pattern; sensitive/account-specific values redacted in the SQL copy |
+| Cloud ingestion | S3 bucket, Snowflake storage integration (IAM role), stage, and manual `COPY INTO` |
 | Orchestration | Not implemented |
+| Continuous integration | GitHub Actions PR checks and manual builds against `AIRBNB_CI` |
 
 ## System architecture
 
@@ -25,7 +26,7 @@ An Airbnb-style analytics engineering project built with Snowflake and dbt. It m
 flowchart LR
     subgraph Repo[Project repository]
         CSV[CSV sample files]
-        DDL[Snowflake DDL and load template]
+        DDL[Snowflake DDL and S3 load SQL]
         DBT[dbt project]
     end
 
@@ -43,7 +44,7 @@ flowchart LR
     DBT -. compiles and runs .-> GO
 ```
 
-The repository currently contains the CSVs, Snowflake table definitions, dbt models, snapshots, macros, and tests. The dotted connections identify setup or deployment steps that still need to be supplied; they are not evidence of an automated AWS pipeline. Values in the checked-in S3 load SQL are placeholders substituted for security and must be supplied securely to execute that script.
+The repository currently contains the CSVs, Snowflake table definitions, dbt models, snapshots, macros, and tests. The dotted connections identify setup or deployment steps that still need to be supplied; they are not evidence of an automated AWS pipeline. The S3 load is run manually from `DDL/resources.sql`, which contains no credentials.
 
 ### AWS-oriented reference architecture
 
@@ -71,13 +72,13 @@ Possible AWS components and their responsibilities:
 
 | Component | Proposed responsibility | Project status |
 |---|---|---|
-| Amazon S3 | Store source files in a durable landing area | S3 stage/COPY load pattern is documented; bucket details are redacted in the SQL copy |
+| Amazon S3 | Store source files in a durable landing area | Implemented: bucket `snowbucketyoussef`, source files under `source/` |
 | S3 prefixes | Separate landing, processed, and rejected files | Design recommendation |
 | S3 event notifications + SQS | Buffer file-arrival events and avoid losing bursts | Not implemented |
-| Snowflake storage integration | Grant Snowflake scoped access to S3 without embedding long-lived AWS keys | Recommended security option; configuration is not shown in this repository |
-| Snowpipe or scheduled `COPY INTO` | Load new files into Snowflake staging | `COPY INTO` load pattern is present; identifiers and credentials are redacted, and automated triggering is not implemented here |
+| Snowflake storage integration | Grant Snowflake scoped access to S3 without embedding long-lived AWS keys | Implemented: `s3_airbnb_int` assumes IAM role `snowflake_s3_role`, limited to read access on `source/` |
+| Snowpipe or scheduled `COPY INTO` | Load new files into Snowflake staging | Manual `COPY INTO` implemented; Snowpipe and automated triggering are not implemented |
 | dbt Core | Build warehouse transformations and run tests | Implemented locally |
-| GitHub Actions or dbt Cloud | Validate and deploy dbt changes | Not implemented |
+| GitHub Actions | Validate dbt changes | PR and manual CI builds implemented |
 | MWAA or Step Functions | Coordinate multi-step ingestion and transformation | Optional future choice; not selected |
 | CloudWatch and alerting | Monitor AWS-side failures and notify operators | Not implemented |
 | BI tool | Explore curated gold-layer datasets | Not included |
@@ -88,7 +89,7 @@ The reference design intentionally leaves orchestration as a decision. For a sma
 
 1. **Prepare source data.** The repository includes CSV examples for bookings, hosts, and listings under `sourceData/`.
 2. **Land files.** In a cloud deployment, upload source files to an S3 landing location. This upload step is not automated in the current project.
-3. **Load Snowflake staging.** The SQL in `DDL/resources.sql` demonstrates a file format, external stage, and `COPY INTO` pattern. Replace the placeholders and configure secure access before running it.
+3. **Load Snowflake staging.** `DDL/resources.sql` creates the storage integration, file format, and external stage, then loads each CSV with `COPY INTO`. It needs the IAM role and trust policy described under Security and deployment notes.
 4. **Declare dbt sources.** `models/sources/sources.yml` maps the Snowflake staging tables to dbt source names.
 5. **Build bronze models.** Bronze models select from the staging sources and use a `CREATED_AT` watermark for incremental runs.
 6. **Transform silver models.** Silver models standardize fields and add derived business attributes.
@@ -130,7 +131,7 @@ This is a simple watermark pattern suitable for demonstrating incremental dbt pr
 
 The silver layer applies business-oriented cleanup and enrichment:
 
-- **Bookings:** derives booking totals through a reusable multiplication macro and retains booking-level attributes.
+- **Bookings:** exposes `booking_amount` as `total_amount` and retains booking-level attributes.
 - **Hosts:** standardizes host text and classifies response rates into readable tags.
 - **Listings:** carries listing, capacity, location, and price attributes and derives a price category.
 
@@ -196,16 +197,13 @@ flowchart LR
 
     obt --> fact
     obt --> eb --> db
-    obt --> el --> dl
-    obt --> eh --> dh
-
-    dl -. joined on listing_id .-> fact
-    dh -. joined on host_id .-> fact
+    sil --> el --> dl
+    sih --> eh --> dh
 ```
 
-- `fact` selects keys and measures from `obt`. Its joins to `dim_listings` and `dim_hosts` select no dimension columns.
-- The ephemeral models in `models/gold/ephemeral/` choose each dimension's columns from `obt`. They create no tables.
-- The `dim_*` tables are dbt snapshots in `AIRBNB.GOLD`, created by `dbt snapshot` from the ephemeral models.
+- `fact` selects keys and measures directly from `obt`. Unused dimension joins were removed to prevent row multiplication; listing and host IDs remain available for reporting relationships.
+- The ephemeral host and listing models read from `silver_hosts` and `silver_listings`, respectively, so each snapshot input has entity-level grain. The ephemeral bookings model still reads from `obt`. Ephemeral models create no tables.
+- The `dim_*` tables are snapshots built from the ephemeral models. Development snapshots use `AIRBNB.GOLD`; CI snapshots use the CI target database and prefixed gold schema.
 
 ## Model grains and business rules
 
@@ -219,7 +217,7 @@ Column-level descriptions live in `aws_snowflake_project/models/schema.yml`.
 | `obt`, `fact` | One booking with listing and host attributes | `booking_id` |
 | `dim_listings`, `dim_hosts`, `dim_bookings` (snapshots, `gold` schema) | One version of a listing, host or booking (SCD Type 2) | Entity ID plus validity range |
 
-**Booking totals.** `booking_amount` is the full-stay price: across the 5,000 sample bookings, `booking_amount / (nights_booked * price_per_night)` has a median of 1.02. The intended total is therefore `booking_amount`, excluding `cleaning_fee` and `service_fee`, which are reported separately. `silver_bookings` currently computes `nights_booked * booking_amount`, which overstates revenue by roughly the number of nights; this is a known defect to fix before building revenue metrics.
+**Booking totals.** `booking_amount` is the full-stay price: across the 5,000 sample bookings, `booking_amount / (nights_booked * price_per_night)` has a median of 1.02. `silver_bookings.total_amount` is therefore `booking_amount`, excluding `cleaning_fee` and `service_fee`, which are reported separately. It previously multiplied by `nights_booked`, which overstated revenue; run `dbt build --full-refresh --select silver_bookings+` to rebuild existing rows, because the incremental filter will not rewrite them.
 
 **Cancellations.** Cancelled bookings stay in every layer and are identified by `booking_status`. Revenue and booking-count metrics should exclude `cancelled` rows unless a metric states otherwise.
 
@@ -228,8 +226,7 @@ Column-level descriptions live in `aws_snowflake_project/models/schema.yml`.
 **Known limitations (confirmed in Snowflake).**
 
 - **Silver duplicate-key issue addressed.** Silver models now configure `unique_key` and incremental filters. After a full refresh, the three Silver keys passed their uniqueness tests. The filters use a strict `CREATED_AT > MAX(CREATED_AT)` watermark, so tied timestamps and late-arriving or updated rows may still be missed.
-- **Downstream models need rebuilding/validation.** The full refresh was run for the Silver models. Rebuild `obt` and rerun snapshots before relying on their contents; the dimensions are sourced from `obt` through the ephemeral models rather than directly from the entity-level Silver models.
-- **`fact` not built.** `AIRBNB.GOLD.FACT` does not exist yet, so its grain is unverified.
+- **CI gold validation completed.** A build in a fresh CI schema passed the fact booking-ID uniqueness test after correcting dimension inputs and removing unused fact joins. This does not establish that older development tables or previously duplicated snapshots have been repaired; they need separate validation and a deliberate migration or cleanup.
 
 ## Historical tracking
 
@@ -261,15 +258,17 @@ The project includes dbt schema tests in `aws_snowflake_project/models/schema.ym
 - An accepted-values check restricting booking status to `confirmed` or `cancelled`
 - `not_null` checks for booking status and listing host IDs
 
-Two singular SQL tests in `aws_snowflake_project/tests/` check numeric rules: `assert_booking_numeric_rules.sql` returns bookings with non-positive nights or negative amounts/fees, and `assert_host_response_rate_range.sql` returns hosts with response rates outside 0–100. dbt automatically discovers these files when `dbt test` runs; no model needs to call them. A singular test passes when its query returns zero rows. If it returns violating rows, dbt marks the test as failed and reports those rows; it does not modify or remove the data.
+Two singular SQL tests in `aws_snowflake_project/tests/` check numeric rules: `assert_booking_numeric_rules.sql` returns bookings with non-positive nights or negative amounts/fees, and `assert_host_response_rate_range.sql` returns hosts with response rates outside 0–100. dbt discovers these files when `dbt test` runs; no model needs to call them. A singular test passes when its query returns zero rows. If it returns violating rows, dbt marks the test as failed and reports the failure count; it does not modify or remove the data. Run the query directly or enable failure storage to inspect the offending rows.
 
 It also includes a custom warning-level test against source bookings. It flags rows with a `booking_amount` below the configured threshold. The warning severity allows the run to complete while surfacing records for review.
 
-Current local validation:
+Validation results:
 
 - `uv run dbt test --select bronze_booking bronze_hosts bronze_listings silver_bookings silver_listings silver_hosts --profiles-dir .` completed successfully: all 29 selected tests passed with no warnings or errors.
 - Run a single singular SQL test by name, for example: `uv run dbt test --select assert_booking_numeric_rules --profiles-dir .`.
-- These targeted model tests do not validate the unbuilt `fact` model, every snapshot, or incremental rerun/late-arrival behavior.
+- A full refresh build (`dbt build --full-refresh`) against data reloaded from S3 completed with `PASS=46 WARN=1 ERROR=0 SKIP=0 TOTAL=47`. These are build-node outcomes, not 47 data tests; the build ran the data tests alongside models and snapshots, including the booking-total check.
+- The warning came from `source_tests`: 286 source bookings had `booking_amount < 200`. Its configured warning severity allowed the build to succeed.
+- Passing current-data tests does not establish incremental rerun, late-arrival, update, or snapshot-history correctness.
 
 Recommended additions as the model matures:
 
@@ -282,11 +281,12 @@ Recommended additions as the model matures:
 ```text
 airbnb-enterprise-data-platform/
 ├── README.md
+├── .github/workflows/dbt-ci.yml    # PR and manual CI workflow
 ├── main.py                         # Minimal Python entry point
 ├── pyproject.toml                  # Python and dbt dependencies
 ├── DDL/
 │   ├── ddl.sql                     # Snowflake raw table definitions
-│   └── resources.sql               # Stage and COPY INTO template
+│   └── resources.sql               # Storage integration, stage, and COPY INTO
 ├── sourceData/
 │   ├── bookings.csv
 │   ├── hosts.csv
@@ -294,6 +294,7 @@ airbnb-enterprise-data-platform/
 └── aws_snowflake_project/
     ├── dbt_project.yml
     ├── profiles.yml                # Local dbt connection configuration
+    ├── ci/profiles.yml             # Committed environment-based CI profile
     ├── macros/
     ├── models/
     │   ├── bronze/
@@ -348,9 +349,46 @@ uv run dbt snapshot --profiles-dir .
 
 The Snowflake account, warehouse, role, database, schema, and authentication values must match your environment. Do not commit real passwords, private keys, or cloud access keys.
 
+## GitHub Actions CI
+
+The workflow in [.github/workflows/dbt-ci.yml](.github/workflows/dbt-ci.yml) runs the **Build and test dbt** job for pull requests from branches in this repository and supports manual runs through `workflow_dispatch`. Fork PRs skip the credentialed job. The manual-run control becomes available when the workflow is present on the default branch.
+
+The job installs Python 3.12 and `uv`, runs `uv sync --locked`, checks the Snowflake connection, and executes `dbt build`. This builds models and snapshots and runs their tests in dependency order. The private key is written to a restricted temporary runner file and removed in an always-run cleanup step; it is not stored in the repository.
+
+### Authentication and isolation
+
+The profile in [aws_snowflake_project/ci/profiles.yml](aws_snowflake_project/ci/profiles.yml) reads environment variables supplied by the workflow. Configure these repository secrets under **Settings > Secrets and variables > Actions**:
+
+| Secret | Purpose |
+|---|---|
+| `SNOWFLAKE_ACCOUNT` | Snowflake account identifier |
+| `SNOWFLAKE_USER` | Dedicated service user, `DBT_CI_USER` |
+| `SNOWFLAKE_ROLE` | Restricted CI role, `DBT_CI_ROLE` |
+| `SNOWFLAKE_WAREHOUSE` | Warehouse used for CI queries |
+| `SNOWFLAKE_DATABASE` | Must be `AIRBNB_CI`; the workflow rejects other values |
+| `SNOWFLAKE_PRIVATE_KEY` | Entire encrypted private-key PEM, including BEGIN/END lines and line breaks |
+| `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE` | Passphrase protecting that private key |
+
+Register only the matching public key with the Snowflake service user. A public-key file or fingerprint cannot substitute for the private-key secret. The CI role has read access to the three `AIRBNB.STAGING` source tables, warehouse usage, and permission to create schemas in `AIRBNB_CI`; it does not need `ACCOUNTADMIN`.
+
+PR 7 uses schema names such as `CI_PR_7_bronze`, `CI_PR_7_silver`, and `CI_PR_7_gold`. Manual runs use a prefix based on the workflow run ID. `ref()` resolves model destinations automatically, and the schema macro prefixes layer schemas only for the `ci` target. Development naming is unchanged. Runs sharing a PR schema are serialized.
+
+From the repository root, with CI environment variables and a private-key file configured locally, the equivalent commands are:
+
+```powershell
+uv run dbt debug --project-dir aws_snowflake_project --profiles-dir aws_snowflake_project/ci --target ci
+uv run dbt build --project-dir aws_snowflake_project --profiles-dir aws_snowflake_project/ci --target ci
+```
+
+The development profile remains ignored by Git; the credential-free `ci/profiles.yml` has an explicit ignore-rule exception so GitHub receives it. Never put literal secrets into the CI profile. Rotate any exposed development credentials and assess Git history separately.
+
+### Verified build result
+
+The GitHub Actions build completed with `PASS=45 WARN=1 ERROR=0 SKIP=0 TOTAL=46`. The warning came from the intentional source-booking amount check. Warning-level data tests do not block a successful job.
+
 ## Security and deployment notes
 
-The checked-in `DDL/resources.sql` copy has its S3 URL, target table, file name, and AWS credentials replaced with placeholders for security. Those placeholders are redactions, not the values to run with; supply the actual configuration securely. Do not commit working credentials. For production, prefer a Snowflake storage integration with an AWS IAM role over embedding long-lived AWS keys in SQL.
+`DDL/resources.sql` loads source data without AWS keys. A Snowflake storage integration (`s3_airbnb_int`) assumes the IAM role `snowflake_s3_role`, whose policy allows only `s3:GetObject` and `s3:ListBucket` on `s3://snowbucketyoussef/source/`. The role's trust policy accepts only the Snowflake IAM user and external ID returned by `DESC INTEGRATION s3_airbnb_int`. The role ARN and bucket path are identifiers, not secrets. Never commit access keys, `.env` files, or the integration's external ID. Do not recreate the integration with `CREATE OR REPLACE`, because that issues a new external ID and breaks the trust policy.
 
 For a cloud deployment:
 
@@ -370,11 +408,11 @@ The bronze models use `CREATED_AT` as a high-water mark. This is easy to underst
 
 ### File ingestion
 
-`DDL/resources.sql` defines a Snowflake file format and external stage, then uses `COPY INTO` to load a named file from S3 into a target table. The checked-in copy has security-sensitive and environment-specific values replaced with placeholders, so it must be populated from secure configuration before execution. This SQL does not create an S3 bucket, upload local files, monitor arrivals, schedule loads, or handle rejected-file remediation.
+`DDL/resources.sql` defines a storage integration, file format, and external stage, then uses `COPY INTO` to load each named CSV from S3 into its staging table. `COPY INTO` skips files it has already loaded, so run `TRUNCATE TABLE` on the target first to reload. The SQL does not create the S3 bucket or IAM role, upload local files, monitor arrivals, schedule loads, or handle rejected-file remediation.
 
 ### Orchestration
 
-dbt commands can be run locally, but the repository does not currently schedule or coordinate them. A future workflow should define ordering, retries, failure notifications, backfills, and whether tests block downstream publication.
+GitHub Actions runs dbt for PR validation and manual CI builds. It is not a scheduled production data orchestrator. Production scheduling, retries, failure notifications, backfills, and downstream publication gates remain future work.
 
 ### Analytics contract
 
@@ -382,10 +420,10 @@ The gold layer is an analytical starting point rather than a fully governed sema
 
 ## Roadmap
 
-1. **Automate ingestion:** create the S3 landing bucket, Snowflake storage integration, and repeatable file-loading workflow.
-2. **Harden configuration:** remove credential placeholders and configure environment-specific secrets and permissions.
+1. **Automate ingestion:** S3 bucket, storage integration, and manual `COPY INTO` are implemented; add S3 event notifications with Snowpipe so new files load automatically.
+2. **Harden configuration:** replace broad S3 permissions on the CLI user with a bucket-scoped policy, and rotate any previously exposed keys.
 3. **Strengthen models and tests:** define model grains, key constraints, relationship checks, freshness, and incremental edge-case coverage.
-4. **Add orchestration and CI:** run dbt validation on changes and schedule controlled deployments with clear failure alerts.
+4. **Extend CI and add orchestration:** CI builds are implemented; verify merge protection, add optional daily validation and CI-schema cleanup, and design controlled deployments with failure alerts.
 5. **Publish analytics:** define trusted business metrics and connect a dashboard or other consumer to selected gold models.
 
 ## System walkthrough
@@ -402,6 +440,6 @@ The end-to-end design follows this sequence:
 
 ## Scope and limitations
 
-This repository demonstrates dbt transformations and warehouse design using sample Airbnb-style datasets. It is not a live Airbnb integration and does not currently provide automated cloud ingestion, a deployed AWS environment, production orchestration, CI/CD, or a dashboard.
+This repository demonstrates dbt transformations, warehouse design, and GitHub Actions CI using sample Airbnb-style datasets. It is not a live Airbnb integration and does not currently provide automated cloud ingestion, a deployed AWS environment, production orchestration, continuous deployment, or a dashboard.
 
 That scope keeps the implementation honest and makes the next engineering steps explicit: automate secure file ingestion, define operational guarantees, expand test coverage, and publish governed analytical outputs.
