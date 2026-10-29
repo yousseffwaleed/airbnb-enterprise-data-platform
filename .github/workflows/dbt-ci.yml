@@ -65,7 +65,7 @@ jobs:
         run: uv run dbt debug --project-dir aws_snowflake_project --profiles-dir aws_snowflake_project/ci --target ci
 
       - name: Build models, snapshots, and tests
-        run: uv run dbt build --project-dir aws_snowflake_project --profiles-dir aws_snowflake_project/ci --target ci
+        run: uv run dbt build --full-refresh --project-dir aws_snowflake_project --profiles-dir aws_snowflake_project/ci --target ci
 
       - name: Remove temporary private key
         if: always()
