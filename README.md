@@ -78,7 +78,7 @@ Possible AWS components and their responsibilities:
 | Snowflake storage integration | Grant Snowflake scoped access to S3 without embedding long-lived AWS keys | Implemented: `s3_airbnb_int` assumes IAM role `snowflake_s3_role`, limited to read access on `source/` |
 | Snowpipe or scheduled `COPY INTO` | Load new files into Snowflake staging | Manual `COPY INTO` implemented; Snowpipe and automated triggering are not implemented |
 | dbt Core | Build warehouse transformations and run tests | Implemented locally |
-| GitHub Actions | Validate dbt changes | PR and manual CI builds implemented; production deployment not implemented |
+| GitHub Actions | Validate dbt changes | PR and manual CI builds implemented |
 | MWAA or Step Functions | Coordinate multi-step ingestion and transformation | Optional future choice; not selected |
 | CloudWatch and alerting | Monitor AWS-side failures and notify operators | Not implemented |
 | BI tool | Explore curated gold-layer datasets | Not included |
