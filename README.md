@@ -2,7 +2,7 @@
 
 An Airbnb-style analytics engineering project built with Snowflake and dbt. It models bookings, hosts, and listings through a medallion-style warehouse, with reusable SQL macros, incremental models, snapshots, and data quality checks.
 
-> **Implementation status:** dbt models, snapshots, tests, and GitHub Actions CI are implemented. CI builds and tests against an isolated Snowflake database using key-pair authentication and GitHub Secrets. Source data loads from S3 into Snowflake through a storage integration, a stage, and Snowpipe auto-ingest driven by S3 event notifications and SQS; no AWS keys are used. Upload of source files to S3, scheduled production orchestration, continuous deployment, and dashboards are not implemented.
+> **Implementation status:** dbt models, snapshots, tests, and GitHub Actions CI are implemented. CI builds and tests against an isolated Snowflake database using key-pair authentication and GitHub Secrets. Source data loads from S3 into Snowflake through a storage integration, a stage, and Snowpipe auto-ingest driven by S3 event notifications and SQS; no AWS keys are used. The S3 bucket, IAM role, storage integration, and warehouses are also defined as Terraform in `terraform/`. Upload of source files to S3, scheduled production orchestration, continuous deployment, and dashboards are not implemented.
 
 ## At a glance
 
@@ -16,6 +16,7 @@ An Airbnb-style analytics engineering project built with Snowflake and dbt. It m
 | Data quality | dbt test, including a warning-level custom check |
 | Cloud ingestion | S3 bucket, storage integration (IAM role), stage, and Snowpipe auto-ingest via S3 event notifications and SQS |
 | Orchestration | Not implemented |
+| Infrastructure as code | Terraform definitions for the S3 bucket, IAM role, Snowflake storage integration, and warehouses |
 | Continuous integration | GitHub Actions PR checks and manual builds against `AIRBNB_CI` |
 
 ## System architecture
@@ -291,6 +292,10 @@ airbnb-enterprise-data-platform/
 │   ├── bookings.csv
 │   ├── hosts.csv
 │   └── listings.csv
+├── terraform/
+│   ├── main.tf                     # S3, IAM role, storage integration, warehouses, imports
+│   ├── variables.tf
+│   └── terraform.tfvars.example    # Placeholder values; copy to terraform.tfvars (git-ignored)
 └── aws_snowflake_project/
     ├── dbt_project.yml
     ├── profiles.yml                # Local dbt connection configuration
@@ -314,7 +319,8 @@ Generated dbt artifacts such as `target/`, package downloads, and logs may appea
 - **dbt-snowflake:** adapter connecting dbt to Snowflake.
 - **SQL and Jinja:** transformation logic and reusable model generation.
 - **Python and uv:** project environment and dependency management.
-- **Amazon S3:** intended object-storage landing area for a future automated ingestion path.
+- **Amazon S3:** object-storage landing area; new CSVs in `source/` trigger Snowpipe through S3 event notifications.
+- **Terraform:** infrastructure as code for the S3 bucket, IAM role, Snowflake storage integration, and warehouses (providers `hashicorp/aws` and `snowflakedb/snowflake`).
 
 ## Local setup
 
@@ -386,6 +392,35 @@ The development profile remains ignored by Git; the credential-free `ci/profiles
 
 The GitHub Actions build completed with `PASS=45 WARN=1 ERROR=0 SKIP=0 TOTAL=46`. The warning came from the intentional source-booking amount check. Warning-level data tests do not block a successful job.
 
+## Infrastructure as code (Terraform)
+
+The `terraform/` folder defines the cloud and Snowflake objects the load path depends on: the S3 bucket and its public-access block, the Snowflake storage integration `S3_AIRBNB_INT`, the IAM role `snowflake_s3_role` with its read policy, and the Snowflake warehouses. `import` blocks adopt the objects that already exist, so the first apply should change nothing.
+
+**Scope.** Terraform manages the bucket, role, integration, and warehouses. The stage, pipes, and S3 event notification are defined in `DDL/resources.sql` and the S3 console, and are not managed by Terraform.
+
+**Circular dependency.** The integration needs the role ARN, and the role's trust policy needs the integration's IAM user ARN and external ID. The configuration builds the role ARN as a string from the account ID and role name, so the integration does not depend on the role resource, and the trust policy reads Snowflake's values from the integration's `describe_output`.
+
+**Requirements**
+
+- Terraform 1.5 or newer (the `import` blocks need it).
+- AWS credentials that can manage IAM and S3.
+- A Snowflake user that can use `ACCOUNTADMIN` and has an RSA public key registered.
+
+**Run**
+
+```powershell
+cd terraform
+Copy-Item terraform.tfvars.example terraform.tfvars   # then fill in organization, account, and user
+$env:SNOWFLAKE_PRIVATE_KEY = Get-Content <path-to-key.p8> -Raw
+$env:SNOWFLAKE_PRIVATE_KEY_PASSPHRASE = '<passphrase>'
+terraform init
+terraform plan
+```
+
+Review the plan before applying. If it proposes replacing the storage integration, stop: a new integration issues a new external ID and breaks the role's trust policy until the apply completes. Match the `warehouses` variable to the output of `SHOW WAREHOUSES` so the plan shows no warehouse changes.
+
+**Secrets.** State files record sensitive values in plaintext, so `*.tfstate`, `.terraform/`, `terraform.tfvars`, and private keys (`*.p8`, `*.pem`) are git-ignored. Provide the Snowflake private key and passphrase only through environment variables. Consider a remote, encrypted backend before sharing this configuration.
+
 ## Security and deployment notes
 
 `DDL/resources.sql` loads source data without AWS keys. A Snowflake storage integration (`s3_airbnb_int`) assumes the IAM role `snowflake_s3_role`, whose policy allows only `s3:GetObject` and `s3:ListBucket` on `s3://snowbucketyoussef/source/`. The role's trust policy accepts only the Snowflake IAM user and external ID returned by `DESC INTEGRATION s3_airbnb_int`. The role ARN and bucket path are identifiers, not secrets. Never commit access keys, `.env` files, or the integration's external ID. Do not recreate the integration with `CREATE OR REPLACE`, because that issues a new external ID and breaks the trust policy.
@@ -440,6 +475,6 @@ The end-to-end design follows this sequence:
 
 ## Scope and limitations
 
-This repository demonstrates dbt transformations, warehouse design, and GitHub Actions CI using sample Airbnb-style datasets. It is not a live Airbnb integration and does not currently provide automated cloud ingestion, a deployed AWS environment, production orchestration, continuous deployment, or a dashboard.
+This repository demonstrates dbt transformations, warehouse design, and GitHub Actions CI using sample Airbnb-style datasets. It is not a live Airbnb integration and does not currently provide automated upload of source files to S3, production orchestration, continuous deployment, or a dashboard.
 
 That scope keeps the implementation honest and makes the next engineering steps explicit: automate secure file ingestion, define operational guarantees, expand test coverage, and publish governed analytical outputs.

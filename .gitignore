@@ -1,2 +1,11 @@
 .env
 /logs/
+
+# Terraform: state holds sensitive values; tfvars and keys must never be committed
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+*.p8
+*.pem

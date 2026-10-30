@@ -1,0 +1,4 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Never commit real values or keys.
+snowflake_organization = "<ORG_NAME>"
+snowflake_account      = "<ACCOUNT_NAME>"
+snowflake_user         = "<TERRAFORM_SERVICE_USER>"
