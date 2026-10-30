@@ -21,7 +21,12 @@ CREATE OR REPLACE STAGE snowstage
   URL = 's3://snowbucketyoussef/source/'
   FILE_FORMAT = csv_format;
 
--- COPY INTO skips files already loaded; truncate the target first to reload.
-COPY INTO HOSTS    FROM @snowstage FILES = ('hosts.csv')    ON_ERROR = ABORT_STATEMENT;
-COPY INTO LISTINGS FROM @snowstage FILES = ('listings.csv') ON_ERROR = ABORT_STATEMENT;
-COPY INTO BOOKINGS FROM @snowstage FILES = ('bookings.csv') ON_ERROR = ABORT_STATEMENT;
+-- Use CREATE, not CREATE OR REPLACE: replacing a pipe resets its load history.
+-- S3 sends new-file events to the queue in SHOW PIPES (notification_channel).
+-- Pipes load only files that arrive after creation; backfill older files with a manual COPY INTO.
+CREATE PIPE IF NOT EXISTS hosts_pipe AUTO_INGEST = TRUE AS
+  COPY INTO HOSTS    FROM @snowstage PATTERN = '.*hosts.*[.]csv';
+CREATE PIPE IF NOT EXISTS listings_pipe AUTO_INGEST = TRUE AS
+  COPY INTO LISTINGS FROM @snowstage PATTERN = '.*listings.*[.]csv';
+CREATE PIPE IF NOT EXISTS bookings_pipe AUTO_INGEST = TRUE AS
+  COPY INTO BOOKINGS FROM @snowstage PATTERN = '.*bookings.*[.]csv';

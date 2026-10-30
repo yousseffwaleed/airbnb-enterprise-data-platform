@@ -2,7 +2,7 @@
 
 An Airbnb-style analytics engineering project built with Snowflake and dbt. It models bookings, hosts, and listings through a medallion-style warehouse, with reusable SQL macros, incremental models, snapshots, and data quality checks.
 
-> **Implementation status:** dbt models, snapshots, tests, and GitHub Actions CI are implemented. CI builds and tests against an isolated Snowflake database using key-pair authentication and GitHub Secrets. Source data loads from S3 into Snowflake through a storage integration, a stage, and `COPY INTO` in `DDL/resources.sql`; no AWS keys are used. Automated file delivery, scheduled production orchestration, continuous deployment, and dashboards are not implemented.
+> **Implementation status:** dbt models, snapshots, tests, and GitHub Actions CI are implemented. CI builds and tests against an isolated Snowflake database using key-pair authentication and GitHub Secrets. Source data loads from S3 into Snowflake through a storage integration, a stage, and Snowpipe auto-ingest driven by S3 event notifications and SQS; no AWS keys are used. Upload of source files to S3, scheduled production orchestration, continuous deployment, and dashboards are not implemented.
 
 ## At a glance
 
@@ -14,7 +14,7 @@ An Airbnb-style analytics engineering project built with Snowflake and dbt. It m
 | Modeling approach | Bronze, silver, and gold layers |
 | History | Timestamp-based dbt snapshots |
 | Data quality | dbt test, including a warning-level custom check |
-| Cloud ingestion | S3 bucket, Snowflake storage integration (IAM role), stage, and manual `COPY INTO` |
+| Cloud ingestion | S3 bucket, storage integration (IAM role), stage, and Snowpipe auto-ingest via S3 event notifications and SQS |
 | Orchestration | Not implemented |
 | Continuous integration | GitHub Actions PR checks and manual builds against `AIRBNB_CI` |
 
@@ -74,9 +74,9 @@ Possible AWS components and their responsibilities:
 |---|---|---|
 | Amazon S3 | Store source files in a durable landing area | Implemented: bucket `snowbucketyoussef`, source files under `source/` |
 | S3 prefixes | Separate landing, processed, and rejected files | Design recommendation |
-| S3 event notifications + SQS | Buffer file-arrival events and avoid losing bursts | Not implemented |
+| S3 event notifications + SQS | Buffer file-arrival events and avoid losing bursts | Implemented: `snowpipe-source` notifies Snowflake's SQS queue for `source/*.csv` |
 | Snowflake storage integration | Grant Snowflake scoped access to S3 without embedding long-lived AWS keys | Implemented: `s3_airbnb_int` assumes IAM role `snowflake_s3_role`, limited to read access on `source/` |
-| Snowpipe or scheduled `COPY INTO` | Load new files into Snowflake staging | Manual `COPY INTO` implemented; Snowpipe and automated triggering are not implemented |
+| Snowpipe or scheduled `COPY INTO` | Load new files into Snowflake staging | Implemented: `hosts_pipe`, `listings_pipe`, and `bookings_pipe` load new files automatically; verified with a test upload |
 | dbt Core | Build warehouse transformations and run tests | Implemented locally |
 | GitHub Actions | Validate dbt changes | PR and manual CI builds implemented |
 | MWAA or Step Functions | Coordinate multi-step ingestion and transformation | Optional future choice; not selected |
@@ -89,7 +89,7 @@ The reference design intentionally leaves orchestration as a decision. For a sma
 
 1. **Prepare source data.** The repository includes CSV examples for bookings, hosts, and listings under `sourceData/`.
 2. **Land files.** In a cloud deployment, upload source files to an S3 landing location. This upload step is not automated in the current project.
-3. **Load Snowflake staging.** `DDL/resources.sql` creates the storage integration, file format, and external stage, then loads each CSV with `COPY INTO`. It needs the IAM role and trust policy described under Security and deployment notes.
+3. **Load Snowflake staging.** `DDL/resources.sql` creates the storage integration, file format, external stage, and one Snowpipe per table. New CSVs in `source/` load automatically. It needs the IAM role, trust policy, and S3 event notification described under Security and deployment notes.
 4. **Declare dbt sources.** `models/sources/sources.yml` maps the Snowflake staging tables to dbt source names.
 5. **Build bronze models.** Bronze models select from the staging sources and use a `CREATED_AT` watermark for incremental runs.
 6. **Transform silver models.** Silver models standardize fields and add derived business attributes.
@@ -286,7 +286,7 @@ airbnb-enterprise-data-platform/
 ├── pyproject.toml                  # Python and dbt dependencies
 ├── DDL/
 │   ├── ddl.sql                     # Snowflake raw table definitions
-│   └── resources.sql               # Storage integration, stage, and COPY INTO
+│   └── resources.sql               # Storage integration, stage, and Snowpipe pipes
 ├── sourceData/
 │   ├── bookings.csv
 │   ├── hosts.csv
@@ -408,7 +408,7 @@ The bronze models use `CREATED_AT` as a high-water mark. This is easy to underst
 
 ### File ingestion
 
-`DDL/resources.sql` defines a storage integration, file format, and external stage, then uses `COPY INTO` to load each named CSV from S3 into its staging table. `COPY INTO` skips files it has already loaded, so run `TRUNCATE TABLE` on the target first to reload. The SQL does not create the S3 bucket or IAM role, upload local files, monitor arrivals, schedule loads, or handle rejected-file remediation.
+`DDL/resources.sql` defines a storage integration, file format, external stage, and one auto-ingest pipe per table. S3 sends `ObjectCreated` events for `source/*.csv` to the pipes' SQS queue, and each pipe loads files whose names match its table. Pipes load only files that arrive after creation and skip names they have already loaded, so use a new file name for every upload. Backfill older files with a manual `COPY INTO`. Never use `CREATE OR REPLACE PIPE`, which resets load history. The SQL does not create the S3 bucket, IAM role, or event notification, upload local files, run dbt after a load, or handle rejected-file remediation.
 
 ### Orchestration
 
@@ -420,7 +420,7 @@ The gold layer is an analytical starting point rather than a fully governed sema
 
 ## Roadmap
 
-1. **Automate ingestion:** S3 bucket, storage integration, and manual `COPY INTO` are implemented; add S3 event notifications with Snowpipe so new files load automatically.
+1. **Automate ingestion:** S3, the storage integration, and Snowpipe auto-ingest are implemented; remaining work is automating uploads to S3 and running dbt after loads.
 2. **Harden configuration:** replace broad S3 permissions on the CLI user with a bucket-scoped policy, and rotate any previously exposed keys.
 3. **Strengthen models and tests:** define model grains, key constraints, relationship checks, freshness, and incremental edge-case coverage.
 4. **Extend CI and add orchestration:** CI builds are implemented; verify merge protection, add optional daily validation and CI-schema cleanup, and design controlled deployments with failure alerts.
