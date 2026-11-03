@@ -2,7 +2,7 @@
 
 An Airbnb-style analytics engineering project built with Snowflake and dbt. It models bookings, hosts, and listings through a medallion-style warehouse, with reusable SQL macros, incremental models, snapshots, and data quality checks.
 
-> **Implementation status:** dbt models, snapshots, tests, and GitHub Actions CI are implemented. CI builds and tests against an isolated Snowflake database using key-pair authentication and GitHub Secrets. Source data loads from S3 into Snowflake through a storage integration, a stage, and Snowpipe auto-ingest driven by S3 event notifications and SQS; no AWS keys are used. The S3 bucket, IAM role, storage integration, and warehouses are also defined as Terraform in `terraform/`. Upload of source files to S3, scheduled production orchestration, continuous deployment, and dashboards are not implemented.
+> **Implementation status:** dbt models, snapshots, tests, and GitHub Actions CI are implemented. CI builds and tests against an isolated Snowflake database using key-pair authentication and GitHub Secrets. Source data loads from S3 into Snowflake through a storage integration, a stage, and Snowpipe auto-ingest driven by S3 event notifications and SQS; no AWS keys are used. The S3 bucket, IAM role, storage integration, and warehouses are also defined as Terraform in `terraform/`. An Airflow DAG built with Cosmos in `airflow/` runs the dbt project daily with retries and a failure alert. Upload of source files to S3, continuous deployment, and dashboards are not implemented.
 
 ## At a glance
 
@@ -15,7 +15,7 @@ An Airbnb-style analytics engineering project built with Snowflake and dbt. It m
 | History | Timestamp-based dbt snapshots |
 | Data quality | dbt test, including a warning-level custom check |
 | Cloud ingestion | S3 bucket, storage integration (IAM role), stage, and Snowpipe auto-ingest via S3 event notifications and SQS |
-| Orchestration | Not implemented |
+| Orchestration | Apache Airflow with Cosmos: daily dbt DAG with retries and a failure alert (local Docker setup) |
 | Infrastructure as code | Terraform definitions for the S3 bucket, IAM role, Snowflake storage integration, and warehouses |
 | Continuous integration | GitHub Actions PR checks and manual builds against `AIRBNB_CI` |
 
@@ -296,6 +296,14 @@ airbnb-enterprise-data-platform/
 │   ├── main.tf                     # S3, IAM role, storage integration, warehouses, imports
 │   ├── variables.tf
 │   └── terraform.tfvars.example    # Placeholder values; copy to terraform.tfvars (git-ignored)
+├── airflow/
+│   ├── Dockerfile                  # Airflow image with dbt in its own virtualenv
+│   ├── docker-compose.yml          # Single-container local Airflow
+│   ├── requirements.txt            # astronomer-cosmos
+│   ├── .env.example                # Placeholder values; copy to .env (git-ignored)
+│   └── dags/
+│       ├── airbnb_dbt_dag.py       # Cosmos DbtDag: retries, daily schedule, failure callback
+│       └── alerts.py               # Failure alert callback
 └── aws_snowflake_project/
     ├── dbt_project.yml
     ├── profiles.yml                # Local dbt connection configuration
@@ -321,6 +329,7 @@ Generated dbt artifacts such as `target/`, package downloads, and logs may appea
 - **Python and uv:** project environment and dependency management.
 - **Amazon S3:** object-storage landing area; new CSVs in `source/` trigger Snowpipe through S3 event notifications.
 - **Terraform:** infrastructure as code for the S3 bucket, IAM role, Snowflake storage integration, and warehouses (providers `hashicorp/aws` and `snowflakedb/snowflake`).
+- **Apache Airflow and Cosmos:** orchestration; Cosmos renders each dbt model and its tests as Airflow tasks.
 
 ## Local setup
 
@@ -421,6 +430,76 @@ Review the plan before applying. If it proposes replacing the storage integratio
 
 **Secrets.** State files record sensitive values in plaintext, so `*.tfstate`, `.terraform/`, `terraform.tfvars`, and private keys (`*.p8`, `*.pem`) are git-ignored. Provide the Snowflake private key and passphrase only through environment variables. Consider a remote, encrypted backend before sharing this configuration.
 
+## Orchestration with Airflow and Cosmos
+
+The `airflow/` folder runs the dbt project as an Apache Airflow DAG using [Astronomer Cosmos](https://astronomer.github.io/astronomer-cosmos/). Cosmos reads the dbt project and renders each model, snapshot, and its tests as Airflow tasks, so the DAG graph mirrors the dbt lineage.
+
+**DAG `airbnb_dbt_daily`** (`airflow/dags/airbnb_dbt_dag.py`)
+
+| Setting | Value |
+|---|---|
+| Schedule | `@daily`, `catchup=False`, one active run at a time |
+| Retries | 2 per task, 5 minute delay, exponential backoff capped at 30 minutes |
+| Failure alert | `on_failure_callback` in `airflow/dags/alerts.py`; runs after retries are exhausted, logs the failure, and posts to `AIRFLOW_ALERT_WEBHOOK_URL` (Slack-compatible, https only) when set |
+| Tests | Each model's tests run immediately after it (`TestBehavior.AFTER_EACH`); tests that span several models (for example the booking total check and the bookings-to-listings relationship) run as separate tasks after all of their parent models (`should_detach_multiple_parents_tests=True`) |
+| Profile | The credential-free `aws_snowflake_project/ci/profiles.yml`, so no secrets live in the DAG or image |
+| Target | Database `AIRBNB_CI`, schemas `AIRFLOW_BRONZE`, `AIRFLOW_SILVER`, `AIRFLOW_GOLD`, kept separate from CI and development |
+
+dbt is installed in its own virtualenv inside the image so its dependencies cannot conflict with Airflow's, and Cosmos runs it as a subprocess (`InvocationMode.SUBPROCESS`) for both parsing and execution. The Snowflake private key is mounted read-only from the host and is never copied into the image.
+
+**Task layout.** Each model that has tests is a task group with a `run` task followed by a `test` task (for example `silver_bookings.run`, `silver_bookings.test`). Models without tests are a single `<model>_run` task, snapshots are `<snapshot>_snapshot` tasks, and ephemeral models render as empty tasks that preserve the dependency chain. All of a model's tests are bundled into its one `test` task, so the DAG has far fewer tasks than dbt has nodes.
+
+**Run locally** (requires Docker Desktop)
+
+1. **Create your settings file.** From the repository root:
+
+   ```powershell
+   cd airflow
+   Copy-Item .env.example .env
+   ```
+
+   Edit `airflow/.env` (never `.env.example`, which is committed) and set the Snowflake account, user, role, warehouse, database `AIRBNB_CI`, the key passphrase `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`, and `SNOWFLAKE_PRIVATE_KEY_FILE`, the full path to your private key using forward slashes (for example `C:/Users/<you>/.snowflake/dbt_ci_private.p8`). Leave `DBT_CI_SCHEMA=AIRFLOW`. Set `AIRFLOW_ALERT_WEBHOOK_URL` only if you want alert messages.
+
+2. **Start Docker Desktop** and wait until it reports the engine is running.
+
+3. **Build and start Airflow.** From the `airflow` folder:
+
+   ```powershell
+   docker compose up --build
+   ```
+
+   The first build downloads the Airflow image and installs dbt and Cosmos. Leave this window open; it shows the logs.
+
+4. **Get the login password.** Airflow generates one for the user `admin` each time the container is created. In a second terminal, in the `airflow` folder:
+
+   ```powershell
+   docker compose logs --no-color airflow | Select-String -Pattern "password" -CaseSensitive:$false | Select-Object -First 5
+   ```
+
+   If the line has scrolled out of the logs, read it from the file Airflow saves:
+
+   ```powershell
+   docker compose exec airflow cat /opt/airflow/simple_auth_manager_passwords.json.generated
+   ```
+
+5. **Open the UI** at http://127.0.0.1:8080 and sign in as `admin` with that password.
+
+6. **Run the DAG.** Find `airbnb_dbt_daily` (it can take a minute to appear while Cosmos reads the dbt project), switch it on, then use **Trigger**. Open the **Graph** view to watch tasks, and click a task and choose **Logs** to see the dbt output.
+
+7. **Stop.** `docker compose down` stops the container and keeps Airflow's history; `docker compose restart airflow` restarts it and keeps the same password. A new container (after `down` and `up`) gets a new password.
+
+Unpausing the DAG makes Airflow create the most recent missed daily run immediately, so a scheduled run may start before your manual trigger; with one active run allowed, the manual run waits in the queue.
+
+To see the failure alert fire, set `AIRFLOW_ALERT_WEBHOOK_URL` in `.env`, break a model, and trigger the DAG.
+
+**Example run.** A successful scheduled run of `airbnb_dbt_daily`: all 26 tasks succeeded, with the models and their tests grouped as `run` and `test` tasks, the three cross-model tests as standalone tasks, and the snapshots at the end.
+
+![Airflow Graph view of a successful airbnb_dbt_daily run](airflow/docs/airflow-successful-run.png)
+
+**Behind a TLS-inspecting proxy.** On networks that re-sign HTTPS traffic (for example Zscaler), the image build and the running container need the proxy's root certificate. Export it as a PEM file with a `.crt` extension into `airflow/certs/`; the Dockerfile adds it to the image's trust store. These files are git-ignored. If Docker itself cannot pull images, enabling WSL mirrored networking (`networkingMode=mirrored` in `%USERPROFILE%\.wslconfig`) can help.
+
+**Limits.** This is a local, single-container setup using SQLite and `airflow standalone`; it runs at most two tasks at a time (`AIRFLOW__CORE__PARALLELISM` in `docker-compose.yml`) to stay within Docker's memory limit, and is meant for development and demonstration, not production. Airflow's own metadata is stored in a Docker volume, and `airflow/.env` is git-ignored.
+
 ## Security and deployment notes
 
 `DDL/resources.sql` loads source data without AWS keys. A Snowflake storage integration (`s3_airbnb_int`) assumes the IAM role `snowflake_s3_role`, whose policy allows only `s3:GetObject` and `s3:ListBucket` on `s3://snowbucketyoussef/source/`. The role's trust policy accepts only the Snowflake IAM user and external ID returned by `DESC INTEGRATION s3_airbnb_int`. The role ARN and bucket path are identifiers, not secrets. Never commit access keys, `.env` files, or the integration's external ID. Do not recreate the integration with `CREATE OR REPLACE`, because that issues a new external ID and breaks the trust policy.
@@ -447,7 +526,7 @@ The bronze models use `CREATED_AT` as a high-water mark. This is easy to underst
 
 ### Orchestration
 
-GitHub Actions runs dbt for PR validation and manual CI builds. It is not a scheduled production data orchestrator. Production scheduling, retries, failure notifications, backfills, and downstream publication gates remain future work.
+GitHub Actions runs dbt for PR validation and manual CI builds. Scheduled runs are handled by the Airflow DAG described above, which provides retries and a failure alert. Backfills, downstream publication gates, and a production Airflow deployment remain future work.
 
 ### Analytics contract
 
@@ -458,7 +537,7 @@ The gold layer is an analytical starting point rather than a fully governed sema
 1. **Automate ingestion:** S3, the storage integration, and Snowpipe auto-ingest are implemented; remaining work is automating uploads to S3 and running dbt after loads.
 2. **Harden configuration:** replace broad S3 permissions on the CLI user with a bucket-scoped policy, and rotate any previously exposed keys.
 3. **Strengthen models and tests:** define model grains, key constraints, relationship checks, freshness, and incremental edge-case coverage.
-4. **Extend CI and add orchestration:** CI builds are implemented; verify merge protection, add optional daily validation and CI-schema cleanup, and design controlled deployments with failure alerts.
+4. **Extend CI and orchestration:** CI builds and the local Airflow DAG are implemented; verify merge protection, add CI-schema cleanup, trigger the DAG after Snowpipe loads, and deploy Airflow beyond a single local container.
 5. **Publish analytics:** define trusted business metrics and connect a dashboard or other consumer to selected gold models.
 
 ## System walkthrough
@@ -475,6 +554,6 @@ The end-to-end design follows this sequence:
 
 ## Scope and limitations
 
-This repository demonstrates dbt transformations, warehouse design, and GitHub Actions CI using sample Airbnb-style datasets. It is not a live Airbnb integration and does not currently provide automated upload of source files to S3, production orchestration, continuous deployment, or a dashboard.
+This repository demonstrates dbt transformations, warehouse design, GitHub Actions CI, and Airflow orchestration using sample Airbnb-style datasets. It is not a live Airbnb integration and does not currently provide automated upload of source files to S3, a production Airflow deployment, continuous deployment, or a dashboard.
 
 That scope keeps the implementation honest and makes the next engineering steps explicit: automate secure file ingestion, define operational guarantees, expand test coverage, and publish governed analytical outputs.

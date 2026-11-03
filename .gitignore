@@ -1,5 +1,7 @@
 .env
 /logs/
+airflow/.env
+airflow/certs/*.crt
 
 # Terraform: state holds sensitive values; tfvars and keys must never be committed
 .terraform/
