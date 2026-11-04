@@ -1,0 +1,27 @@
+services:
+  airflow:
+    build: .
+    command: standalone
+    ports:
+      - "127.0.0.1:8080:8080"
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: "120"
+      AIRFLOW__CORE__PARALLELISM: "2"
+      AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "2"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/state/airflow.db
+      DBT_PROJECT_DIR: /opt/airflow/dbt/aws_snowflake_project
+      SNOWFLAKE_PRIVATE_KEY_PATH: /run/secrets/snowflake_key.p8
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ../aws_snowflake_project:/opt/airflow/dbt/aws_snowflake_project
+      - airflow-state:/opt/airflow/state
+      - type: bind
+        source: ${SNOWFLAKE_PRIVATE_KEY_FILE:?set SNOWFLAKE_PRIVATE_KEY_FILE in airflow/.env}
+        target: /run/secrets/snowflake_key.p8
+        read_only: true
+
+volumes:
+  airflow-state:
