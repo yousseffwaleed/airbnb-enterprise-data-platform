@@ -1,0 +1,12 @@
+aws_snowflake_project:
+  target: docs
+  outputs:
+    docs:
+      type: snowflake
+      account: placeholder
+      user: placeholder
+      password: placeholder
+      database: AIRBNB
+      warehouse: placeholder
+      schema: docs
+      threads: 1

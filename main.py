@@ -1,5 +1,5 @@
 def main():
-    print("Hello from airbnb-enterprise-data-platform!")
+    print("Hello from airbnb-data-platform!")
 
 
 if __name__ == "__main__":

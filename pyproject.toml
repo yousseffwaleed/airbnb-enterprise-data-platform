@@ -1,7 +1,7 @@
 [project]
-name = "airbnb-enterprise-data-platform"
+name = "airbnb-data-platform"
 version = "0.1.0"
-description = "Add your description here"
+description = "Airbnb-style analytics platform using Snowflake, dbt, and Power BI"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
