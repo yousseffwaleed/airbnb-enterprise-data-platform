@@ -12,6 +12,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  sql-lint:
+    name: SQLFluff lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - run: uvx pre-commit run --all-files
+
   dbt-build:
     name: Build and test dbt
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository

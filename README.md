@@ -1,8 +1,8 @@
-# Airbnb Enterprise Data Platform
+# Airbnb Data Platform
 
-An Airbnb-style analytics engineering project built with Snowflake and dbt. It models bookings, hosts, and listings through a medallion-style warehouse, with reusable SQL macros, incremental models, snapshots, and data quality checks.
+An Airbnb-style analytics engineering project built with Snowflake, dbt, and Power BI. It models bookings, hosts, and listings through a medallion-style warehouse, with incremental transformations, snapshots, data quality checks, and an interactive dashboard.
 
-> **Implementation status:** dbt models, snapshots, tests, and GitHub Actions CI are implemented. CI builds and tests against an isolated Snowflake database using key-pair authentication and GitHub Secrets. Source data loads from S3 into Snowflake through a storage integration, a stage, and Snowpipe auto-ingest driven by S3 event notifications and SQS; no AWS keys are used. The S3 bucket, IAM role, storage integration, and warehouses are also defined as Terraform in `terraform/`. An Airflow DAG built with Cosmos in `airflow/` runs the dbt project daily with retries and a failure alert. Upload of source files to S3, continuous deployment, and dashboards are not implemented.
+The platform combines S3 and Snowpipe ingestion with dbt transformations, snapshots, data quality tests, GitHub Actions CI, Terraform definitions, a local Airflow/Cosmos DAG, and a Power BI report. Source CSVs are uploaded to S3 manually; Airflow schedules dbt independently of Snowpipe.
 
 ## At a glance
 
@@ -18,6 +18,7 @@ An Airbnb-style analytics engineering project built with Snowflake and dbt. It m
 | Orchestration | Apache Airflow with Cosmos: daily dbt DAG with retries and a failure alert (local Docker setup) |
 | Infrastructure as code | Terraform definitions for the S3 bucket, IAM role, Snowflake storage integration, and warehouses |
 | Continuous integration | GitHub Actions PR checks and manual builds against `AIRBNB_CI` |
+| Analytics | Power BI Desktop report built on Gold facts and dimensions |
 
 ## System architecture
 
@@ -32,64 +33,32 @@ flowchart LR
     end
 
     CSV -. configured cloud upload required .-> S3[(Amazon S3 landing bucket)]
-    S3 -. stage URL and secure access required .-> RAW[Snowflake staging tables]
-    DDL -. defines tables and COPY pattern .-> RAW
+    S3 --> EVENT[S3 object-created event]
+    EVENT --> QUEUE[Snowflake SQS queue]
+    QUEUE --> PIPE[Snowpipe]
+    S3 --> PIPE --> RAW[Snowflake staging tables]
+    DDL -. configures stage and pipes .-> PIPE
     RAW --> BR[Bronze models]
     BR --> SI[Silver models]
     SI --> GO[Gold models]
-    SI --> SNAP[dbt snapshots]
+    SI --> SNAP[dbt snapshots / dimensions]
     GO --> TEST[dbt tests]
-    GO --> BI[Analytics consumer]
+    GO --> BI[Power BI semantic model]
+    SNAP --> BI
+    BI --> DASH[Interactive dashboard]
     DBT -. compiles and runs .-> BR
     DBT -. compiles and runs .-> SI
     DBT -. compiles and runs .-> GO
 ```
 
-The repository currently contains the CSVs, Snowflake table definitions, dbt models, snapshots, macros, and tests. The dotted connections identify setup or deployment steps that still need to be supplied; they are not evidence of an automated AWS pipeline. The S3 load is run manually from `DDL/resources.sql`, which contains no credentials.
+The repository includes sample CSVs, Snowflake load definitions, dbt models and tests, and a Power BI report. Snowpipe loads matching new files after they are uploaded to S3; uploading files and triggering dbt after a load are separate steps. The SQL does not contain AWS access keys.
 
-### AWS-oriented reference architecture
-
-The following is a production direction for the project, not a claim that these AWS services have already been provisioned.
-
-```mermaid
-flowchart LR
-    SRC[Data producers / CSV exports] --> LAND[(Amazon S3 landing zone)]
-    LAND --> EVENT[Object event notification]
-    EVENT --> QUEUE[Amazon SQS queue]
-    QUEUE --> LOAD[Snowflake Snowpipe or scheduled COPY]
-    LOAD --> RAW[Snowflake raw / staging]
-    RAW --> DBT[dbt run and test]
-    DBT --> BR[Bronze]
-    BR --> SIL[Silver]
-    SIL --> GOLD[Gold marts]
-    GOLD --> CONSUMER[BI / analytics consumers]
-    ORCH[MWAA, Step Functions, or CI workflow] -. coordinates .-> LOAD
-    ORCH -. coordinates .-> DBT
-    IAM[AWS IAM role] -. scoped access .-> LAND
-    MON[CloudWatch / run alerts] -. observability .-> ORCH
-```
-
-Possible AWS components and their responsibilities:
-
-| Component | Proposed responsibility | Project status |
-|---|---|---|
-| Amazon S3 | Store source files in a durable landing area | Implemented: bucket `snowbucketyoussef`, source files under `source/` |
-| S3 prefixes | Separate landing, processed, and rejected files | Design recommendation |
-| S3 event notifications + SQS | Buffer file-arrival events and avoid losing bursts | Implemented: `snowpipe-source` notifies Snowflake's SQS queue for `source/*.csv` |
-| Snowflake storage integration | Grant Snowflake scoped access to S3 without embedding long-lived AWS keys | Implemented: `s3_airbnb_int` assumes IAM role `snowflake_s3_role`, limited to read access on `source/` |
-| Snowpipe or scheduled `COPY INTO` | Load new files into Snowflake staging | Implemented: `hosts_pipe`, `listings_pipe`, and `bookings_pipe` load new files automatically; verified with a test upload |
-| dbt Core | Build warehouse transformations and run tests | Implemented locally |
-| GitHub Actions | Validate dbt changes | PR and manual CI builds implemented |
-| MWAA or Step Functions | Coordinate multi-step ingestion and transformation | Optional future choice; not selected |
-| CloudWatch and alerting | Monitor AWS-side failures and notify operators | Not implemented |
-| BI tool | Explore curated gold-layer datasets | Not included |
-
-The reference design intentionally leaves orchestration as a decision. For a small project, a scheduled GitHub Actions workflow or dbt Cloud job may be enough. MWAA is more appropriate when the platform needs richer DAG dependencies, retries, backfills, and operational controls.
+The `snowpipe-source` S3 notification sends object-created events to Snowflake's SQS queue. Three Snowpipe pipes load matching CSV files into staging, using a storage integration and an IAM role for bucket access. The Power BI report consumes the Gold fact and dimensions.
 
 ## Data flow
 
 1. **Prepare source data.** The repository includes CSV examples for bookings, hosts, and listings under `sourceData/`.
-2. **Land files.** In a cloud deployment, upload source files to an S3 landing location. This upload step is not automated in the current project.
+2. **Land files.** Upload source files to the S3 landing location.
 3. **Load Snowflake staging.** `DDL/resources.sql` creates the storage integration, file format, external stage, and one Snowpipe per table. New CSVs in `source/` load automatically. It needs the IAM role, trust policy, and S3 event notification described under Security and deployment notes.
 4. **Declare dbt sources.** `models/sources/sources.yml` maps the Snowflake staging tables to dbt source names.
 5. **Build bronze models.** Bronze models select from the staging sources and use a `CREATED_AT` watermark for incremental runs.
@@ -97,6 +66,7 @@ The reference design intentionally leaves orchestration as a decision. For a sma
 7. **Publish gold models.** Gold models combine booking, listing, and host attributes for analytical use.
 8. **Track changes.** dbt snapshots retain historical versions of selected models.
 9. **Validate outputs.** Run dbt tests and inspect warnings or failures before consumers use the models.
+10. **Analyze in Power BI.** Import the Gold fact and dimensions into the report's semantic model and explore the dashboard.
 
 ## Data domains
 
@@ -150,7 +120,7 @@ The key is specific to each model. `HOST_ID` can appear on many rows in `silver_
 
 The gold layer combines silver entities for easier analysis. The operational base table joins bookings to listings and then listings to hosts, making reservation, property, and host attributes available together.
 
-The `obt.sql` model uses Jinja configuration to generate column selections and joins. This demonstrates dbt macro/Jinja capabilities; as the project grows, model-specific SQL or tested macros may be easier to maintain than a highly generic query generator.
+The `obt.sql` model uses Jinja configuration to generate column selections and joins.
 
 ### Model lineage
 
@@ -227,13 +197,62 @@ Column-level descriptions live in `aws_snowflake_project/models/schema.yml`.
 **Known limitations (confirmed in Snowflake).**
 
 - **Silver duplicate-key issue addressed.** Silver models now configure `unique_key` and incremental filters. After a full refresh, the three Silver keys passed their uniqueness tests. The filters use a strict `CREATED_AT > MAX(CREATED_AT)` watermark, so tied timestamps and late-arriving or updated rows may still be missed.
-- **CI gold validation completed.** A build in a fresh CI schema passed the fact booking-ID uniqueness test after correcting dimension inputs and removing unused fact joins. This does not establish that older development tables or previously duplicated snapshots have been repaired; they need separate validation and a deliberate migration or cleanup.
+- **Gold validation and snapshot rebuild.** CI passed the fact booking-ID uniqueness test. During BI integration, the development snapshot tables were reported backed up, rebuilt, and validated as described below; ongoing snapshot-history correctness still requires testing.
 
 ## Historical tracking
 
 The project contains timestamp-strategy snapshots for bookings, hosts, and listings. A unique key identifies each entity, while its creation/update timestamp is used as the snapshot's `updated_at` input.
 
 Snapshots preserve prior versions when the tracked row changes. In a production design, confirm that the selected timestamp changes whenever tracked attributes change. If `CREATED_AT` is immutable after insertion, it will not detect later updates; use a genuine `UPDATED_AT` column or consider dbt's check strategy.
+
+## Power BI Analytics Dashboard
+
+![Power BI executive dashboard showing booking and revenue analysis](PowerBI/airbnb-dashboard.png)
+
+Power BI executive dashboard built on the Snowflake Gold star schema, providing revenue, booking, pricing, listing, host, property-type, geographic, and interactive filtering analysis. The [Power BI Desktop report](PowerBI/Airbnb_Dashboards.pbix) uses the Snowflake connector with key-pair authentication and Import mode, according to the report implementation notes.
+
+The dashboard displays Total Revenue, Total Bookings, Average Nightly Price, Total Listings, and Total Hosts alongside monthly revenue, revenue by property type, and the top 10 countries by revenue. Country and property-type slicers use listing attributes; booking status comes from the booking dimension. Slicers filter the fact-based visuals through the semantic model's relationships.
+
+The screenshot shows approximately 6.49M in revenue, 5.0K bookings, 170.32 average nightly price, 500 listings, and 189 hosts represented in the fact data. These are values from this sample dataset and report state, not Airbnb-wide metrics. `Average Nightly Price` is averaged over fact rows, so listings with more bookings have more weight. The displayed revenue measure does not itself exclude cancelled bookings; use the booking-status slicer or define a separate filtered measure when cancellation-adjusted revenue is needed.
+
+### Semantic Model
+
+The report uses `FACT` as its central table and `DIM_BOOKINGS`, `DIM_HOSTS`, and `DIM_LISTINGS` as dimensions. The reported relationships are one-to-many from each dimension's business key to the corresponding key in `FACT`; `OBT` is an upstream dbt model rather than the report's primary table. Dimensions are dbt snapshots, so when genuine history accumulates, a business key may have multiple versions. A current-row filter or version-aware relationship is needed before using such keys on the one side of a relationship.
+
+```mermaid
+flowchart LR
+    BOOKINGS[DIM_BOOKINGS: booking_id] --> FACT[FACT: booking measures]
+    HOSTS[DIM_HOSTS: host_id] --> FACT
+    LISTINGS[DIM_LISTINGS: listing_id] --> FACT
+    FACT --> DAX[DAX measures]
+    DAX --> DASHBOARD[Power BI dashboard]
+```
+
+The report's core measures, as supplied in the implementation notes, are:
+
+```dax
+Total Revenue = SUM(FACT[TOTAL_AMOUNT])
+Total Bookings = DISTINCTCOUNT(FACT[BOOKING_ID])
+Average Nightly Price = AVERAGE(FACT[PRICE_PER_NIGHT])
+Total Listings = DISTINCTCOUNT(FACT[LISTING_ID])
+Total Hosts = DISTINCTCOUNT(FACT[HOST_ID])
+```
+
+## Snapshot Data Quality
+
+During Power BI integration, duplicate dimension keys prevented clean one-to-many relationships. Instead of hiding the duplicates in Power Query, the investigation checked Bronze and Silver keys, reviewed the ephemeral host model, and traced the issue to physical rows in the Gold snapshots. For hosts, the source and Silver keys were reported unique, and the ephemeral `hosts` model selects from `silver_hosts` without a join.
+
+The reported Snowflake validation results were:
+
+| Snapshot | Before: total rows | Before: distinct business keys / SCD IDs | After: rows / keys / SCD IDs |
+|---|---:|---:|---:|
+| `DIM_HOSTS` | 240,011 | 200 / 200 | 200 / 200 / 200 |
+| `DIM_BOOKINGS` | 75,000 | 5,000 / 5,000 | 5,000 / 5,000 / 5,000 |
+| `DIM_LISTINGS` | 240,000 | 500 / 500 | 500 / 500 / 500 |
+
+Repeated physical rows with the same `DBT_SCD_ID` are not distinct snapshot versions. Before rebuilding, the existing transient snapshot tables were backed up with transient zero-copy clones; the snapshots were then dropped, recreated with `dbt snapshot`, checked for row and key counts, and refreshed in Power BI. The backups preserve the previous tables; rebuilding from current input does not reconstruct their history. The exact cause of the duplicates has not been established, and the counts alone do not prove future history will remain correct.
+
+This keeps the Gold data-quality correction upstream in Snowflake/dbt, rather than masking the issue in Power Query. The Power BI implementation and remediation counts above are based on the supplied project notes; the `.pbix` binary model and live Snowflake state were not independently inspected in this documentation update.
 
 ## Reusable dbt logic
 
@@ -270,12 +289,6 @@ Validation results:
 - A full refresh build (`dbt build --full-refresh`) against data reloaded from S3 completed with `PASS=46 WARN=1 ERROR=0 SKIP=0 TOTAL=47`. These are build-node outcomes, not 47 data tests; the build ran the data tests alongside models and snapshots, including the booking-total check.
 - The warning came from `source_tests`: 286 source bookings had `booking_amount < 200`. Its configured warning severity allowed the build to succeed.
 - Passing current-data tests does not establish incremental rerun, late-arrival, update, or snapshot-history correctness.
-
-Recommended additions as the model matures:
-
-- source freshness thresholds once source loading is automated
-- reconciliation checks for source and target row counts or financial totals
-- tests for incremental reruns, late-arriving records, and changed source rows
 
 ## Repository layout
 
@@ -328,6 +341,7 @@ Generated dbt artifacts such as `target/`, package downloads, and logs may appea
 - **SQL and Jinja:** transformation logic and reusable model generation.
 - **Python and uv:** project environment and dependency management.
 - **Amazon S3:** object-storage landing area; new CSVs in `source/` trigger Snowpipe through S3 event notifications.
+- **Power BI Desktop:** imported Gold semantic model, DAX measures, and interactive dashboard.
 - **Terraform:** infrastructure as code for the S3 bucket, IAM role, Snowflake storage integration, and warehouses (providers `hashicorp/aws` and `snowflakedb/snowflake`).
 - **Apache Airflow and Cosmos:** orchestration; Cosmos renders each dbt model and its tests as Airflow tasks.
 
@@ -364,9 +378,20 @@ uv run dbt snapshot --profiles-dir .
 
 The Snowflake account, warehouse, role, database, schema, and authentication values must match your environment. Do not commit real passwords, private keys, or cloud access keys.
 
+### SQL linting
+
+Install the Git hook and run the SQLFluff baseline from the repository root:
+
+```powershell
+uvx pre-commit install
+uvx pre-commit run --all-files
+```
+
+SQLFluff uses the Snowflake dialect and Jinja's dbt built-ins. The initial `AM06` rule checks consistent `GROUP BY` and `ORDER BY` references; this narrow baseline is not a full SQL style or dbt compilation check.
+
 ## GitHub Actions CI
 
-The workflow in [.github/workflows/dbt-ci.yml](.github/workflows/dbt-ci.yml) runs the **Build and test dbt** job for pull requests from branches in this repository and supports manual runs through `workflow_dispatch`. Fork PRs skip the credentialed job. The manual-run control becomes available when the workflow is present on the default branch.
+The workflow in [.github/workflows/dbt-ci.yml](.github/workflows/dbt-ci.yml) runs SQLFluff on pull requests and the **Build and test dbt** job for pull requests from branches in this repository. It also supports manual runs through `workflow_dispatch`. Fork PRs skip the credentialed job. The manual-run control becomes available when the workflow is present on the default branch.
 
 The job installs Python 3.12 and `uv`, runs `uv sync --locked`, checks the Snowflake connection, and executes `dbt build`. This builds models and snapshots and runs their tests in dependency order. The private key is written to a restricted temporary runner file and removed in an always-run cleanup step; it is not stored in the repository.
 
@@ -401,11 +426,23 @@ The development profile remains ignored by Git; the credential-free `ci/profiles
 
 The GitHub Actions build completed with `PASS=45 WARN=1 ERROR=0 SKIP=0 TOTAL=46`. The warning came from the intentional source-booking amount check. Warning-level data tests do not block a successful job.
 
+### dbt docs on GitHub Pages
+
+The [dbt docs workflow](.github/workflows/dbt-docs.yml) generates a static site on pushes to `main` and on manual runs from `main`. In **Settings > Pages**, choose **GitHub Actions** as the build and deployment source, then run the workflow or merge it to `main`. The deployment job provides the published URL.
+
+Generation uses a placeholder-only profile and an empty catalog, so it does not connect to Snowflake or require credentials. The site includes project lineage and descriptions but omits live warehouse catalog metadata and compiled SQL. GitHub Pages is public for this repository: review the generated manifest, including model names and project metadata, before publishing.
+
+To generate the same files locally from the repository root:
+
+```powershell
+uv run dbt docs generate --project-dir aws_snowflake_project --profiles-dir .github/dbt-docs --target docs --no-compile --empty-catalog
+```
+
 ## Infrastructure as code (Terraform)
 
 The `terraform/` folder defines the cloud and Snowflake objects the load path depends on: the S3 bucket and its public-access block, the Snowflake storage integration `S3_AIRBNB_INT`, the IAM role `snowflake_s3_role` with its read policy, and the Snowflake warehouses. `import` blocks adopt the objects that already exist, so the first apply should change nothing.
 
-**Scope.** Terraform manages the bucket, role, integration, and warehouses. The stage, pipes, and S3 event notification are defined in `DDL/resources.sql` and the S3 console, and are not managed by Terraform.
+The Terraform configuration defines the bucket, role, integration, and warehouses. The stage and pipes are defined in `DDL/resources.sql`; the S3 event notification is configured in the AWS console.
 
 **Circular dependency.** The integration needs the role ARN, and the role's trust policy needs the integration's IAM user ARN and external ID. The configuration builds the role ARN as a string from the account ID and role name, so the integration does not depend on the role resource, and the trust policy reads Snowflake's values from the integration's `describe_output`.
 
@@ -498,7 +535,7 @@ To see the failure alert fire, set `AIRFLOW_ALERT_WEBHOOK_URL` in `.env`, break 
 
 **Behind a TLS-inspecting proxy.** On networks that re-sign HTTPS traffic (for example Zscaler), the image build and the running container need the proxy's root certificate. Export it as a PEM file with a `.crt` extension into `airflow/certs/`; the Dockerfile adds it to the image's trust store. These files are git-ignored. If Docker itself cannot pull images, enabling WSL mirrored networking (`networkingMode=mirrored` in `%USERPROFILE%\.wslconfig`) can help.
 
-**Limits.** This is a local, single-container setup using SQLite and `airflow standalone`; it runs at most two tasks at a time (`AIRFLOW__CORE__PARALLELISM` in `docker-compose.yml`) to stay within Docker's memory limit, and is meant for development and demonstration, not production. Airflow's own metadata is stored in a Docker volume, and `airflow/.env` is git-ignored.
+The local Airflow setup uses a single container, SQLite and `airflow standalone`, with a maximum of two concurrent tasks. Airflow metadata is stored in a Docker volume, and `airflow/.env` is git-ignored.
 
 ## Security and deployment notes
 
@@ -526,19 +563,11 @@ The bronze models use `CREATED_AT` as a high-water mark. This is easy to underst
 
 ### Orchestration
 
-GitHub Actions runs dbt for PR validation and manual CI builds. Scheduled runs are handled by the Airflow DAG described above, which provides retries and a failure alert. Backfills, downstream publication gates, and a production Airflow deployment remain future work.
+GitHub Actions runs dbt for PR validation and manual CI builds. The local Airflow DAG schedules dbt runs and provides retries and an optional webhook failure alert.
 
 ### Analytics contract
 
-The gold layer is an analytical starting point rather than a fully governed semantic layer. Metric definitions, grain, ownership, freshness expectations, and consumer-facing documentation should be agreed before adding dashboards or external consumers.
-
-## Roadmap
-
-1. **Automate ingestion:** S3, the storage integration, and Snowpipe auto-ingest are implemented; remaining work is automating uploads to S3 and running dbt after loads.
-2. **Harden configuration:** replace broad S3 permissions on the CLI user with a bucket-scoped policy, and rotate any previously exposed keys.
-3. **Strengthen models and tests:** define model grains, key constraints, relationship checks, freshness, and incremental edge-case coverage.
-4. **Extend CI and orchestration:** CI builds and the local Airflow DAG are implemented; verify merge protection, add CI-schema cleanup, trigger the DAG after Snowpipe loads, and deploy Airflow beyond a single local container.
-5. **Publish analytics:** define trusted business metrics and connect a dashboard or other consumer to selected gold models.
+The Gold layer supplies the fact and dimensions used by the Power BI semantic model. The dashboard measures and their interpretation are documented in the Power BI section.
 
 ## System walkthrough
 
@@ -550,10 +579,6 @@ The end-to-end design follows this sequence:
 4. Silver models standardize fields and derive business attributes.
 5. Gold models join the entities into analytics-ready outputs.
 6. Snapshots retain historical versions, while dbt tests check selected data quality rules.
-7. The AWS reference architecture describes a future path to automated file delivery, loading, orchestration, and monitoring.
+7. Power BI imports the Gold fact and dimensions for interactive analysis.
 
-## Scope and limitations
-
-This repository demonstrates dbt transformations, warehouse design, GitHub Actions CI, and Airflow orchestration using sample Airbnb-style datasets. It is not a live Airbnb integration and does not currently provide automated upload of source files to S3, a production Airflow deployment, continuous deployment, or a dashboard.
-
-That scope keeps the implementation honest and makes the next engineering steps explicit: automate secure file ingestion, define operational guarantees, expand test coverage, and publish governed analytical outputs.
+The project uses sample Airbnb-style datasets; it is not a live Airbnb integration.

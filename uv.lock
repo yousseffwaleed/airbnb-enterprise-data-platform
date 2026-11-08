@@ -21,7 +21,7 @@ wheels = [
 ]
 
 [[package]]
-name = "airbnb-enterprise-data-platform"
+name = "airbnb-data-platform"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

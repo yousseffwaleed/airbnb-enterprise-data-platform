@@ -1,0 +1,8 @@
+[sqlfluff]
+dialect = snowflake
+templater = jinja
+rules = AM06
+
+[sqlfluff:templater:jinja]
+apply_dbt_builtins = True
+load_macros_from_path = aws_snowflake_project/macros

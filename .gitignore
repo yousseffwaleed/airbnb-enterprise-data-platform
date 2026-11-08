@@ -2,6 +2,7 @@
 /logs/
 airflow/.env
 airflow/certs/*.crt
+.github/dbt-docs/.user.yml
 
 # Terraform: state holds sensitive values; tfvars and keys must never be committed
 .terraform/
